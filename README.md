@@ -223,7 +223,7 @@ Common error codes:
 | `missing_csvkey` | 401 | Auth query parameter is absent or empty |
 | `unauthorized` | 401 | Auth key does not match `CSVKEY` |
 | `missing_config` | 500 | Required Worker secret is absent |
-| `bad_request` | 400 | Invalid method, body, field, or provider |
+| `bad_request` | 400 | Malformed JSON, invalid fields, invalid provider, or invalid identifiers |
 | `not_found` | 404 | Workflow, document, round, or route is missing |
 | `conflict` | 409 | Round already complete or workflow is locked |
 | `validation_failed` | 422 | Valid JSON, but not runnable as requested |
@@ -235,7 +235,7 @@ Common error codes:
 
 | Method | Route | Auth | Purpose |
 | --- | --- | --- | --- |
-| `GET` | `/health` | no | Version and KV accessibility check |
+| `GET` | `/health` | no | Version and KV binding availability check |
 | `GET` | `/workflows` | yes | List workflow configs |
 | `POST` | `/workflows` | yes | Create or update a workflow config |
 | `GET` | `/workflows/:name` | yes | Read one workflow with derived metadata |
@@ -441,6 +441,14 @@ roles, and roles map to uploaded document ids.
 If `template` is omitted, the Worker uses a built-in review template that
 references `{{readme}}` and `{{spec}}`. If implementation review is enabled,
 the built-in implementation template also references `{{implementation}}`.
+
+The simplest workflows should pass an explicit `documents` map, as the examples
+above do. If `documents` is omitted, the Worker derives default role mappings
+from the built-in templates. Because the built-in implementation template is
+available for implementation rounds, that default map can include
+`"implementation": "impl"`; upload `/documents/<workflow>/impl` as well, or
+provide an explicit `documents` map when a workflow only needs README and spec
+documents.
 
 Implementation context is selected when:
 
