@@ -4,7 +4,7 @@ use worker::*;
 
 use crate::convergence::{read_stats, rebuild_stats_from_rounds};
 use crate::error::{json_error, success_response};
-use crate::storage::{config_key, kv_get, kv_list_by_prefix, round_key};
+use crate::storage::{config_key, kv_get, kv_list_by_prefix};
 use crate::types::{Round, RoundStatus, Workflow};
 
 pub async fn handle_get(kv: KvStore, workflow: &str) -> Result<Response> {

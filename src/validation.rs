@@ -116,6 +116,7 @@ pub fn check_round_number(round: u32) -> std::result::Result<(), ValidationError
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn validate_round_number(round: u32) -> std::result::Result<(), Response> {
     check_round_number(round).map_err(|e| e.into_response())
 }

@@ -131,6 +131,7 @@ pub async fn release_lock(kv: &KvStore, workflow: &str) -> Result<()> {
     kv_delete(kv, &lock_key(workflow)).await
 }
 
+#[allow(dead_code)]
 pub async fn check_lock(kv: &KvStore, workflow: &str) -> Result<Option<Lock>> {
     kv_get::<Lock>(kv, &lock_key(workflow)).await
 }

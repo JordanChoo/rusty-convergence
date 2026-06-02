@@ -35,6 +35,7 @@ macro_rules! require_auth {
         if let Err(resp) = validate_auth(&csvkey, &secret) {
             return Ok(resp);
         }
+        console_log!("auth_ok");
         $env.kv("APRP")?
     }};
 }
@@ -45,7 +46,25 @@ async fn handle_request(req: Request, env: Env) -> Result<Response> {
     let path = url.path();
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
-    match segments.as_slice() {
+    let start_ms = Date::now().as_millis();
+    console_log!("request_received method={} path={}", method, path);
+
+    let handler_name = match segments.as_slice() {
+        [] | ["health"] => "health",
+        ["workflows"] => "workflows",
+        ["workflows", _] => "workflows/:name",
+        ["documents", _, _] => "documents/:workflow/:role",
+        ["run", _, _] => "run/:workflow/:round",
+        ["rounds", _, _] => "rounds/:workflow/:round",
+        ["rounds", _] => "rounds/:workflow",
+        ["stats", _, "rebuild"] => "stats/:workflow/rebuild",
+        ["stats", _] => "stats/:workflow",
+        ["integrate", _, _] => "integrate/:workflow/:round",
+        _ => "not_found",
+    };
+    console_log!("route_dispatch handler={}", handler_name);
+
+    let result = match segments.as_slice() {
         [] | ["health"] => {
             if method != Method::Get {
                 return json_error(405, "Method not allowed", "method_not_allowed", None);
@@ -131,5 +150,21 @@ async fn handle_request(req: Request, env: Env) -> Result<Response> {
         }
 
         _ => json_error(404, "Not found", "not_found", None),
+    };
+
+    let elapsed = Date::now().as_millis() - start_ms;
+    match &result {
+        Ok(resp) => {
+            console_log!(
+                "request_completed status={} duration_ms={}",
+                resp.status_code(),
+                elapsed
+            );
+        }
+        Err(e) => {
+            console_log!("request_error error={} duration_ms={}", e, elapsed);
+        }
     }
+
+    result
 }

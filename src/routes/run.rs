@@ -380,7 +380,7 @@ pub async fn handle(
                 &rendered_prompt,
                 provider_params,
             );
-            let mut headers = Headers::new();
+            let headers = Headers::new();
             headers.set("Authorization", &format!("Bearer {api_key}"))?;
             headers.set("Content-Type", "application/json")?;
             (crate::providers::openai::API_URL, body, headers)
@@ -392,7 +392,7 @@ pub async fn handle(
                 &rendered_prompt,
                 provider_params,
             );
-            let mut headers = Headers::new();
+            let headers = Headers::new();
             headers.set("x-api-key", &api_key)?;
             headers.set("anthropic-version", crate::providers::anthropic::API_VERSION)?;
             headers.set("Content-Type", "application/json")?;
