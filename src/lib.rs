@@ -1,14 +1,14 @@
 use worker::*;
 
-mod convergence;
-mod error;
-mod metrics;
-mod prompt;
-mod providers;
-mod routes;
-mod storage;
-mod types;
-mod validation;
+pub mod convergence;
+pub mod error;
+pub mod metrics;
+pub mod prompt;
+pub mod providers;
+pub mod routes;
+pub mod storage;
+pub mod types;
+pub mod validation;
 
 use error::json_error;
 use validation::{validate_auth, validate_csvkey};
