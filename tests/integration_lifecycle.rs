@@ -284,14 +284,20 @@ fn probe_extract_placeholder_only() {
 #[test]
 fn probe_convergence_two_identical_then_different() {
     let cv = compute_change_velocity(&[1000, 1000, 500]);
-    assert!((cv - 0.0).abs() < 0.001, "velocity should be 0 when latest delta IS the max, got {cv}");
+    assert!(
+        (cv - 0.0).abs() < 0.001,
+        "velocity should be 0 when latest delta IS the max, got {cv}"
+    );
 }
 
 #[test]
 fn probe_convergence_spike_then_settle() {
     let ot = compute_output_trend(&[1000, 3000, 1000, 1000]);
     let expected = 1.0 - (1000.0 / 3000.0);
-    assert!((ot - expected).abs() < 0.001, "ot={ot}, expected={expected}");
+    assert!(
+        (ot - expected).abs() < 0.001,
+        "ot={ot}, expected={expected}"
+    );
 
     let cv = compute_change_velocity(&[1000, 3000, 1000, 1000]);
     assert_eq!(cv, 1.0, "latest delta is 0, should be perfect velocity");
