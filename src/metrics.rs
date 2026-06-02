@@ -17,13 +17,12 @@ pub fn compute_metrics(content: &str) -> DocumentMetrics {
     let mut headings: u32 = 0;
     for line in content.lines() {
         lines += 1;
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("# ")
-            || trimmed.starts_with("## ")
-            || trimmed.starts_with("### ")
-            || trimmed.starts_with("#### ")
-            || trimmed.starts_with("##### ")
-            || trimmed.starts_with("###### ")
+        if line.starts_with("# ")
+            || line.starts_with("## ")
+            || line.starts_with("### ")
+            || line.starts_with("#### ")
+            || line.starts_with("##### ")
+            || line.starts_with("###### ")
         {
             headings += 1;
         }
@@ -119,9 +118,10 @@ mod tests {
     }
 
     #[test]
-    fn test_indented_heading() {
+    fn test_indented_heading_not_counted() {
+        // PRD regex ^#{1,6}\s requires # at line start
         let m = compute_metrics("  # indented heading");
-        assert_eq!(m.headings, 1);
+        assert_eq!(m.headings, 0);
     }
 
     #[test]

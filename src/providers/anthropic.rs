@@ -30,6 +30,9 @@ pub fn build_request_body(
         }
     }
 
+    // Force streaming — the Worker depends on SSE format for response parsing.
+    body["stream"] = json!(true);
+
     body
 }
 

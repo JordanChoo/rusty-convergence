@@ -11,7 +11,7 @@ use crate::providers::parse_sse_events;
 use crate::providers::StreamChunk;
 use crate::storage::{acquire_lock, config_key, kv_get, kv_put, release_lock, round_key};
 use crate::types::{Round, RoundStatus, RunOverrides, UsageStats, Workflow};
-use crate::validation::parse_and_validate_round;
+use crate::validation::{parse_and_validate_round, validate_workflow_name};
 
 #[derive(Debug)]
 pub enum RoundAction {
@@ -79,6 +79,7 @@ pub struct RoundCompletionSummary {
     pub characters: u32,
     pub headings: u32,
     pub convergence: crate::types::ConvergenceData,
+    pub completed_at: String,
     pub duration_seconds: u64,
 }
 
@@ -93,15 +94,14 @@ pub async fn on_round_complete(
     model: &str,
     include_impl: bool,
     started_at: &str,
-    _warnings: Vec<String>,
 ) -> Result<RoundCompletionSummary> {
     let metrics = compute_metrics(content);
 
     let convergence =
         update_stats_after_round(kv, workflow, round_num, content, metrics.words).await?;
 
-    let now = now_iso8601();
-    let duration = compute_duration(started_at, &now);
+    let completed_at = now_iso8601();
+    let duration = compute_duration(started_at, &completed_at);
 
     let complete_round = Round {
         workflow: workflow.to_string(),
@@ -116,7 +116,7 @@ pub async fn on_round_complete(
         model: model.to_string(),
         include_impl,
         started_at: started_at.to_string(),
-        completed_at: Some(now),
+        completed_at: Some(completed_at.clone()),
         failed_at: None,
         duration_seconds: Some(duration),
         error: None,
@@ -134,6 +134,7 @@ pub async fn on_round_complete(
         characters: metrics.characters,
         headings: metrics.headings,
         convergence,
+        completed_at,
         duration_seconds: duration,
     })
 }
@@ -199,6 +200,9 @@ pub async fn handle(
     round_str: &str,
     mut req: Request,
 ) -> Result<Response> {
+    if let Err(resp) = validate_workflow_name(workflow) {
+        return Ok(resp);
+    }
     let round = match parse_and_validate_round(round_str) {
         Ok(n) => n,
         Err(resp) => return Ok(resp),
@@ -458,8 +462,13 @@ pub async fn handle(
     let status_code = llm_response.status_code();
     if status_code != 200 {
         let error_body = llm_response.text().await.unwrap_or_default();
-        let error_msg = format!("provider_error: HTTP {status_code}: {error_body}");
-        on_round_failed(
+        let truncated_body = if error_body.len() > 2048 {
+            &error_body[..error_body.floor_char_boundary(2048)]
+        } else {
+            &error_body
+        };
+        let error_msg = format!("provider_error: HTTP {status_code}: {truncated_body}");
+        let _ = on_round_failed(
             &kv,
             workflow,
             round,
@@ -470,7 +479,7 @@ pub async fn handle(
             include_impl,
             &now,
         )
-        .await?;
+        .await;
         return json_error(502, &error_msg, "provider_error", None);
     }
 
@@ -478,7 +487,7 @@ pub async fn handle(
         Ok(b) => b,
         Err(e) => {
             let error_msg = format!("Failed to read provider response: {e}");
-            on_round_failed(
+            let _ = on_round_failed(
                 &kv,
                 workflow,
                 round,
@@ -489,7 +498,7 @@ pub async fn handle(
                 include_impl,
                 &now,
             )
-            .await?;
+            .await;
             return json_error(502, &error_msg, "provider_error", None);
         }
     };
@@ -497,6 +506,7 @@ pub async fn handle(
     let events = parse_sse_events(&raw_body);
     let mut content_buffer = String::new();
     let mut usage: Option<UsageStats> = None;
+    let mut stream_completed = false;
 
     match provider.as_str() {
         "openai" => {
@@ -504,14 +514,17 @@ pub async fn handle(
                 match crate::providers::openai::parse_event(event) {
                     Ok(StreamChunk::Text(t)) => content_buffer.push_str(&t),
                     Ok(StreamChunk::Usage(u)) => usage = Some(u),
-                    Ok(StreamChunk::Done) => break,
+                    Ok(StreamChunk::Done) => {
+                        stream_completed = true;
+                        break;
+                    }
                     Err(e) => {
                         let partial = if content_buffer.is_empty() {
                             None
                         } else {
                             Some(content_buffer.as_str())
                         };
-                        on_round_failed(
+                        let _ = on_round_failed(
                             &kv,
                             workflow,
                             round,
@@ -522,7 +535,7 @@ pub async fn handle(
                             include_impl,
                             &now,
                         )
-                        .await?;
+                        .await;
                         return json_error(502, &e.to_string(), "provider_error", None);
                     }
                 }
@@ -535,6 +548,7 @@ pub async fn handle(
                     Ok(StreamChunk::Text(t)) => content_buffer.push_str(&t),
                     Ok(StreamChunk::Usage(u)) => usage = Some(u),
                     Ok(StreamChunk::Done) => {
+                        stream_completed = true;
                         usage = Some(crate::providers::anthropic::finalize_usage(&state));
                         break;
                     }
@@ -544,7 +558,7 @@ pub async fn handle(
                         } else {
                             Some(content_buffer.as_str())
                         };
-                        on_round_failed(
+                        let _ = on_round_failed(
                             &kv,
                             workflow,
                             round,
@@ -555,17 +569,20 @@ pub async fn handle(
                             include_impl,
                             &now,
                         )
-                        .await?;
+                        .await;
                         return json_error(502, &e.to_string(), "provider_error", None);
                     }
                 }
+            }
+            if usage.is_none() {
+                usage = Some(crate::providers::anthropic::finalize_usage(&state));
             }
         }
         _ => unreachable!(),
     }
 
     if content_buffer.is_empty() {
-        on_round_failed(
+        let _ = on_round_failed(
             &kv,
             workflow,
             round,
@@ -576,8 +593,30 @@ pub async fn handle(
             include_impl,
             &now,
         )
-        .await?;
+        .await;
         return json_error(502, "Empty response from provider", "provider_error", None);
+    }
+
+    if !stream_completed {
+        let bytes = content_buffer.len();
+        let _ = on_round_failed(
+            &kv,
+            workflow,
+            round,
+            &format!("Stream ended without completion signal after {bytes} bytes"),
+            Some(&content_buffer),
+            &provider,
+            &model,
+            include_impl,
+            &now,
+        )
+        .await;
+        return json_error(
+            502,
+            &format!("Stream ended without completion signal after {bytes} bytes"),
+            "provider_error",
+            Some("The LLM response may have been truncated. Partial content saved. Retry with POST /run."),
+        );
     }
 
     let summary = on_round_complete(
@@ -590,7 +629,6 @@ pub async fn handle(
         &model,
         include_impl,
         &now,
-        template_warnings,
     )
     .await?;
 
@@ -618,10 +656,10 @@ pub async fn handle(
             "provider": provider,
             "model": model,
             "started_at": now,
-            "completed_at": now_iso8601(),
+            "completed_at": summary.completed_at,
             "duration_seconds": summary.duration_seconds,
         }),
-        vec![],
+        template_warnings,
         None,
     )
 }

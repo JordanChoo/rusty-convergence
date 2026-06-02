@@ -172,15 +172,38 @@ pub async fn render_template(
         contents.insert(placeholder.clone(), text);
     }
 
-    let mut rendered = template.to_string();
-    for (placeholder, content) in &contents {
-        let token = format!("{{{{{placeholder}}}}}");
-        rendered = rendered.replace(&token, content);
-    }
+    let rendered = render_single_pass(template, &contents);
 
     let warnings = detect_unreferenced_roles(documents, &placeholders);
 
     Ok((rendered, warnings))
+}
+
+fn render_single_pass(template: &str, contents: &HashMap<String, String>) -> String {
+    let mut result = String::with_capacity(template.len());
+    let bytes = template.as_bytes();
+    let mut copy_from = 0;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'{' && bytes[i + 1] == b'{' {
+            let start = i + 2;
+            if let Some(end_offset) = template[start..].find("}}") {
+                let name = &template[start..start + end_offset];
+                if let Some(content) = contents.get(name) {
+                    result.push_str(&template[copy_from..i]);
+                    result.push_str(content);
+                    i = start + end_offset + 2;
+                    copy_from = i;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+
+    result.push_str(&template[copy_from..]);
+    result
 }
 
 #[cfg(test)]
@@ -358,5 +381,55 @@ mod tests {
         let referenced = vec!["readme".to_string(), "spec".to_string()];
         let warnings = detect_unreferenced_roles(&docs, &referenced);
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn test_render_single_pass_no_double_expansion() {
+        let mut contents = HashMap::new();
+        contents.insert("readme".to_string(), "See {{spec}} reference".to_string());
+        contents.insert("spec".to_string(), "the actual spec".to_string());
+
+        let template = "README: {{readme}}\nSPEC: {{spec}}";
+        let rendered = render_single_pass(template, &contents);
+
+        assert!(
+            rendered.contains("See {{spec}} reference"),
+            "Document content with placeholder-like text must NOT be expanded. Got: {rendered}"
+        );
+        assert!(rendered.contains("SPEC: the actual spec"));
+    }
+
+    #[test]
+    fn test_render_single_pass_basic() {
+        let mut contents = HashMap::new();
+        contents.insert("name".to_string(), "World".to_string());
+
+        let rendered = render_single_pass("Hello {{name}}!", &contents);
+        assert_eq!(rendered, "Hello World!");
+    }
+
+    #[test]
+    fn test_render_single_pass_multiple_same_placeholder() {
+        let mut contents = HashMap::new();
+        contents.insert("x".to_string(), "val".to_string());
+
+        let rendered = render_single_pass("{{x}} and {{x}}", &contents);
+        assert_eq!(rendered, "val and val");
+    }
+
+    #[test]
+    fn test_render_single_pass_unknown_placeholder_preserved() {
+        let contents = HashMap::new();
+        let rendered = render_single_pass("Hello {{unknown}}", &contents);
+        assert_eq!(rendered, "Hello {{unknown}}");
+    }
+
+    #[test]
+    fn test_render_single_pass_utf8() {
+        let mut contents = HashMap::new();
+        contents.insert("greeting".to_string(), "héllo wörld".to_string());
+
+        let rendered = render_single_pass("Say: {{greeting}}!", &contents);
+        assert_eq!(rendered, "Say: héllo wörld!");
     }
 }

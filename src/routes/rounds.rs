@@ -6,7 +6,7 @@ use crate::error::{json_error, success_response};
 use crate::routes::run::{default_lock_ttl, effective_status};
 use crate::storage::{config_key, kv_get, kv_list_by_prefix, round_key};
 use crate::types::{Round, RoundStatus, Workflow};
-use crate::validation::parse_and_validate_round;
+use crate::validation::{parse_and_validate_round, validate_workflow_name};
 
 pub async fn handle_get(
     kv: KvStore,
@@ -15,6 +15,9 @@ pub async fn handle_get(
     round_str: &str,
     req: &Request,
 ) -> Result<Response> {
+    if let Err(resp) = validate_workflow_name(workflow) {
+        return Ok(resp);
+    }
     let round = match parse_and_validate_round(round_str) {
         Ok(n) => n,
         Err(resp) => return Ok(resp),
@@ -115,6 +118,9 @@ pub async fn handle_get(
 }
 
 pub async fn handle_list(kv: KvStore, env: &Env, workflow: &str, url: &Url) -> Result<Response> {
+    if let Err(resp) = validate_workflow_name(workflow) {
+        return Ok(resp);
+    }
     if kv_get::<Workflow>(&kv, &config_key(workflow))
         .await?
         .is_none()

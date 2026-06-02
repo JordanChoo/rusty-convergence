@@ -4,7 +4,7 @@ use worker::*;
 
 use crate::error::{json_error, success_response};
 use crate::storage::{doc_key, kv_get_text, kv_put_text};
-use crate::validation::validate_role_name;
+use crate::validation::{validate_role_name, validate_workflow_name};
 
 const DEFAULT_MAX_DOCUMENT_BYTES: usize = 1_048_576; // 1 MB
 const SMALL_DOCUMENT_THRESHOLD: usize = 500;
@@ -23,6 +23,9 @@ pub async fn handle_upload(
     role: &str,
     mut req: Request,
 ) -> Result<Response> {
+    if let Err(resp) = validate_workflow_name(workflow) {
+        return Ok(resp);
+    }
     if let Err(resp) = validate_role_name(role) {
         return Ok(resp);
     }
@@ -67,6 +70,9 @@ pub async fn handle_upload(
 }
 
 pub async fn handle_get(kv: KvStore, workflow: &str, role: &str) -> Result<Response> {
+    if let Err(resp) = validate_workflow_name(workflow) {
+        return Ok(resp);
+    }
     if let Err(resp) = validate_role_name(role) {
         return Ok(resp);
     }

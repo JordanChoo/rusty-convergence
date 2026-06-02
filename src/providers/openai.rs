@@ -32,6 +32,11 @@ pub fn build_request_body(
         }
     }
 
+    // Force streaming — the Worker depends on SSE format for response parsing.
+    // provider_params must not override these.
+    body["stream"] = json!(true);
+    body["stream_options"] = json!({"include_usage": true});
+
     body
 }
 

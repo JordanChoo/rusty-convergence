@@ -5,9 +5,12 @@ use worker::*;
 use crate::error::{json_error, success_response};
 use crate::storage::{kv_get, round_key};
 use crate::types::{Round, RoundStatus};
-use crate::validation::parse_and_validate_round;
+use crate::validation::{parse_and_validate_round, validate_workflow_name};
 
 pub async fn handle(kv: KvStore, workflow: &str, round_str: &str) -> Result<Response> {
+    if let Err(resp) = validate_workflow_name(workflow) {
+        return Ok(resp);
+    }
     let round = match parse_and_validate_round(round_str) {
         Ok(n) => n,
         Err(resp) => return Ok(resp),

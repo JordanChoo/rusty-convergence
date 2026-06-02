@@ -9,8 +9,12 @@ use crate::error::{json_error, now_iso8601, success_response};
 use crate::storage::{config_key, kv_get, kv_list_by_prefix, kv_put, meta_key};
 use crate::types::Meta;
 use crate::types::{Round, RoundStatus, Workflow};
+use crate::validation::validate_workflow_name;
 
 pub async fn handle_get(kv: KvStore, workflow: &str) -> Result<Response> {
+    if let Err(resp) = validate_workflow_name(workflow) {
+        return Ok(resp);
+    }
     if kv_get::<Workflow>(&kv, &config_key(workflow))
         .await?
         .is_none()
@@ -81,6 +85,9 @@ pub async fn handle_get(kv: KvStore, workflow: &str) -> Result<Response> {
 }
 
 pub async fn handle_rebuild(kv: KvStore, workflow: &str) -> Result<Response> {
+    if let Err(resp) = validate_workflow_name(workflow) {
+        return Ok(resp);
+    }
     if kv_get::<Workflow>(&kv, &config_key(workflow))
         .await?
         .is_none()
