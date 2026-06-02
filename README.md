@@ -1,0 +1,689 @@
+# Rusty Convergence
+
+Rusty Convergence is an API-first implementation of Automated Plan Reviser
+Pro (APRP): a Rust Cloudflare Worker that runs iterative specification review
+rounds against direct LLM APIs, stores the results in Cloudflare KV, and
+computes convergence signals so callers know when a plan is becoming stable.
+
+The system is designed for coding agents, CI jobs, scripts, and other
+automation. It does not drive a browser, depend on a ChatGPT web session, or
+write to a local filesystem. A caller uploads source documents, defines a
+workflow, asks the Worker to run round N, and receives a normalized JSON record
+containing the review output, metrics, provider usage, and convergence data.
+
+## Why This Exists
+
+Complex technical plans rarely become good in one pass. Security protocols,
+software architecture documents, migration plans, API designs, and product specs
+usually improve through repeated review:
+
+- early rounds find large architectural flaws and missing requirements
+- middle rounds refine interfaces, invariants, and failure modes
+- later rounds produce smaller edits as the design settles
+
+Rusty Convergence automates that loop. It turns "ask an LLM to review this
+plan again" into a durable API workflow with history, retry semantics,
+document bundling, provider abstraction, and convergence analytics.
+
+This is useful when you want:
+
+- programmatic review rounds from a CLI, CI job, or agent orchestrator
+- direct OpenAI and Anthropic API execution rather than browser automation
+- durable round history without operating a database
+- reproducible document bundles and prompt templates
+- objective signals for whether another review round is likely to be useful
+- a small deployable artifact that can run on Cloudflare Workers
+
+## Core Concepts
+
+### Workflow
+
+A workflow is the saved configuration for a review loop. It names the LLM
+provider and model, optional system prompt, provider-specific parameters, the
+document roles to include, and the templates used to build prompts.
+
+Workflows are stored in KV under `config::<workflow>`.
+
+### Document
+
+A document is raw markdown or text uploaded to a workflow under a role such as
+`readme`, `spec`, or `impl`. The Worker stores documents in KV and substitutes
+them into templates using `{{placeholder}}` syntax.
+
+Documents are stored under `doc::<workflow>::<role>`.
+
+### Round
+
+A round is one LLM review execution for a workflow. Round 1 has no convergence
+score because there is no previous output to compare against. Round 2 and later
+are compared with earlier completed rounds to estimate whether the review loop
+is converging.
+
+Rounds are stored under `round::<workflow>::<number>`.
+
+### Stats
+
+Stats are the cached convergence view for a workflow. The Worker updates stats
+after each completed round and can rebuild them from saved rounds if needed.
+
+Stats are stored under `stats::<workflow>`.
+
+### Integration Prompt
+
+The integration endpoint wraps a completed round in instructions suitable for a
+coding agent. This keeps the Worker focused on review generation while leaving
+source editing to the caller.
+
+## Architecture
+
+```
+Client or agent
+    |
+    | HTTP + csvkey
+    v
+Cloudflare Worker (Rust)
+    |
+    | validate auth, route, method, names, round number
+    v
+KV-backed workflow and document loader
+    |
+    | render template with {{document}} placeholders
+    v
+Provider adapter
+    |
+    | OpenAI Chat Completions API or Anthropic Messages API
+    v
+Provider SSE parser
+    |
+    | normalized text, usage, completion status
+    v
+Round recorder
+    |
+    | metrics, convergence, stats, metadata
+    v
+Cloudflare KV
+```
+
+The Worker is stateless. All durable state is in a single KV namespace bound as
+`APRP`. The code is organized around small modules:
+
+```
+src/
+|-- lib.rs              # Worker entry point and route dispatch
+|-- validation.rs       # csvkey auth, input validation, constant-time compare
+|-- error.rs            # JSON response envelope and error helpers
+|-- storage.rs          # KV key patterns, JSON/text helpers, locks
+|-- prompt.rs           # Template parsing and document substitution
+|-- metrics.rs          # Word/line/byte/heading metrics
+|-- convergence.rs      # Three-signal convergence algorithm
+|-- types.rs            # Workflow, Round, Stats, Usage, and related structs
+|-- providers/
+|   |-- mod.rs          # Shared SSE parsing and provider errors
+|   |-- openai.rs       # OpenAI request building and stream parsing
+|   `-- anthropic.rs    # Anthropic request building and stream parsing
+`-- routes/
+    |-- health.rs
+    |-- workflows.rs
+    |-- documents.rs
+    |-- run.rs
+    |-- rounds.rs
+    |-- stats.rs
+    `-- integrate.rs
+```
+
+## Design Principles
+
+### Direct APIs, No Browser Automation
+
+The Worker calls provider APIs directly. OpenAI calls use the Chat Completions
+endpoint. Anthropic calls use the Messages endpoint. There is no dependency on
+web UI state, cookies, browser profiles, local Node processes, or SSH access to
+a machine running an interactive session.
+
+### API-Only Execution
+
+Every operation is available over HTTP. The Worker does not commit code, edit
+documents, manage branches, or operate an interactive TUI. This keeps the
+service composable: callers can be shell scripts, coding agents, scheduled CI
+jobs, dashboards, or one-off curl commands.
+
+### Durable State, Stateless Compute
+
+KV stores workflow config, source documents, round outputs, metadata, locks,
+and stats. The Worker can be redeployed or scaled without moving state.
+
+### Provider Isolation
+
+Provider-specific request shapes and SSE formats are isolated behind adapter
+modules. The route layer deals with normalized chunks:
+
+- `Text`
+- `Usage`
+- `Done`
+
+OpenAI and Anthropic can therefore share workflow logic, locking, persistence,
+metrics, and convergence calculations.
+
+### Conservative Overwrite Rules
+
+Completed rounds cannot be overwritten. Failed or stale rounds can be retried.
+Sequential enforcement requires round N-1 to be complete before round N, unless
+the caller explicitly sets `skip_sequence_check: true`.
+
+### Cheap Convergence Signals
+
+Convergence is intentionally simple enough to compute at the edge. It uses word
+counts and word-set similarity rather than expensive semantic embeddings. The
+goal is not a perfect mathematical proof of convergence; it is a useful signal
+for deciding whether more review rounds are worth the cost.
+
+## Authentication
+
+Every route except `GET /health` requires a `csvkey` query parameter.
+
+```
+GET /workflows?csvkey=<secret>
+POST /run/my-spec/1?csvkey=<secret>
+```
+
+The expected value is stored as a Cloudflare Worker secret named `CSVKEY`.
+Comparison uses a constant-time XOR-and-fold check to avoid early-exit timing
+leaks.
+
+This is single-tenant internal-tool authentication. Because the key is in the
+URL, do not use this as a public multi-tenant API without changing the auth
+model.
+
+## Response Envelope
+
+JSON responses use one envelope shape:
+
+```json
+{
+  "ok": true,
+  "code": "ok",
+  "data": {},
+  "warnings": [],
+  "hint": null,
+  "error": null,
+  "meta": {
+    "version": "0.1.0",
+    "ts": "2026-06-02T14:30:00Z"
+  }
+}
+```
+
+Errors use the same shape with `ok: false`, `data: null`, a stable `code`, and
+a human-readable `error`.
+
+Common error codes:
+
+| Code | HTTP | Meaning |
+| --- | ---: | --- |
+| `missing_csvkey` | 401 | Auth query parameter is absent or empty |
+| `unauthorized` | 401 | Auth key does not match `CSVKEY` |
+| `missing_config` | 500 | Required Worker secret is absent |
+| `bad_request` | 400 | Invalid method, body, field, or provider |
+| `not_found` | 404 | Workflow, document, round, or route is missing |
+| `conflict` | 409 | Round already complete or workflow is locked |
+| `validation_failed` | 422 | Valid JSON, but not runnable as requested |
+| `provider_error` | 502 | OpenAI or Anthropic returned or caused an error |
+| `internal_error` | 500 | Unexpected Worker-side failure |
+| `method_not_allowed` | 405 | Route exists but method is not accepted |
+
+## API Reference
+
+| Method | Route | Auth | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/health` | no | Version and KV accessibility check |
+| `GET` | `/workflows` | yes | List workflow configs |
+| `POST` | `/workflows` | yes | Create or update a workflow config |
+| `GET` | `/workflows/:name` | yes | Read one workflow with derived metadata |
+| `DELETE` | `/workflows/:name` | yes | Delete workflow state |
+| `PUT` | `/documents/:workflow/:role` | yes | Upload one source document |
+| `GET` | `/documents/:workflow/:role` | yes | Retrieve one source document as markdown |
+| `POST` | `/run/:workflow/:round` | yes | Execute one review round |
+| `GET` | `/rounds/:workflow` | yes | List rounds for a workflow |
+| `GET` | `/rounds/:workflow/:round` | yes | Retrieve one round |
+| `GET` | `/stats/:workflow` | yes | Read cached convergence analytics |
+| `POST` | `/stats/:workflow/rebuild` | yes | Recompute stats from completed rounds |
+| `POST` | `/integrate/:workflow/:round` | yes | Generate a coding-agent integration prompt |
+
+## Quick Start With Curl
+
+Set the deployment URL and auth key:
+
+```bash
+export WORKER_URL="https://rusty-convergence.<your-subdomain>.workers.dev"
+export CSVKEY="<your-shared-secret>"
+```
+
+Check health:
+
+```bash
+curl "$WORKER_URL/health"
+```
+
+Upload source documents before creating the workflow. Workflow creation
+validates that the referenced document roles already exist in KV.
+
+```bash
+curl -X PUT \
+  -H "Content-Type: text/markdown" \
+  --data-binary @README.md \
+  "$WORKER_URL/documents/demo/readme?csvkey=$CSVKEY"
+
+curl -X PUT \
+  -H "Content-Type: text/markdown" \
+  --data-binary @prd/prd.md \
+  "$WORKER_URL/documents/demo/spec?csvkey=$CSVKEY"
+```
+
+Create an OpenAI workflow:
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "demo",
+    "description": "Iterative review for the demo specification",
+    "provider": "openai",
+    "model": "<openai-model-id>",
+    "system_prompt": "You are a careful systems architect and security reviewer.",
+    "provider_params": {
+      "reasoning_effort": "high",
+      "max_completion_tokens": 4000
+    },
+    "documents": {
+      "readme": "readme",
+      "spec": "spec"
+    }
+  }' \
+  "$WORKER_URL/workflows?csvkey=$CSVKEY"
+```
+
+Run round 1:
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  "$WORKER_URL/run/demo/1?csvkey=$CSVKEY"
+```
+
+Run round 2 after round 1 is complete:
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  "$WORKER_URL/run/demo/2?csvkey=$CSVKEY"
+```
+
+Inspect the result:
+
+```bash
+curl "$WORKER_URL/rounds/demo/2?csvkey=$CSVKEY"
+curl -H "Accept: text/markdown" "$WORKER_URL/rounds/demo/2?csvkey=$CSVKEY"
+curl "$WORKER_URL/stats/demo?csvkey=$CSVKEY"
+```
+
+Generate an integration prompt:
+
+```bash
+curl -X POST "$WORKER_URL/integrate/demo/2?csvkey=$CSVKEY"
+```
+
+## Anthropic Workflows
+
+Anthropic is selected with `"provider": "anthropic"` and any Anthropic model id
+enabled for your account.
+
+For a separate Anthropic workflow, upload the same source documents under that
+workflow name first:
+
+```bash
+curl -X PUT \
+  -H "Content-Type: text/markdown" \
+  --data-binary @README.md \
+  "$WORKER_URL/documents/demo-claude/readme?csvkey=$CSVKEY"
+
+curl -X PUT \
+  -H "Content-Type: text/markdown" \
+  --data-binary @prd/prd.md \
+  "$WORKER_URL/documents/demo-claude/spec?csvkey=$CSVKEY"
+```
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "demo-claude",
+    "provider": "anthropic",
+    "model": "<anthropic-model-id>",
+    "system_prompt": "You are a careful systems architect and security reviewer.",
+    "provider_params": {
+      "max_tokens": 4000,
+      "thinking": {
+        "type": "enabled",
+        "budget_tokens": 2000
+      }
+    },
+    "documents": {
+      "readme": "readme",
+      "spec": "spec"
+    }
+  }' \
+  "$WORKER_URL/workflows?csvkey=$CSVKEY"
+```
+
+The Anthropic adapter sends:
+
+- `x-api-key: <ANTHROPIC_API_KEY>`
+- `anthropic-version: 2023-06-01`
+- `stream: true`
+- a `system` field when configured
+- one user message containing the rendered prompt
+
+Thinking blocks are parsed but not stored as round content. Only text blocks are
+captured in the saved round output.
+
+## Per-Run Provider Overrides
+
+The `POST /run/:workflow/:round` request body can override provider settings
+without changing the saved workflow:
+
+```json
+{
+  "provider": "anthropic",
+  "model": "<anthropic-model-id>",
+  "include_impl": true,
+  "skip_sequence_check": false,
+  "system_prompt": "Review this as a production readiness gate.",
+  "provider_params": {
+    "max_tokens": 4000
+  }
+}
+```
+
+This is useful for comparing OpenAI and Anthropic on the same documents, trying
+a higher reasoning budget for one round, or forcing implementation context into
+a specific review.
+
+Provider params are passed through with protected fields blocked:
+
+| Provider | Protected fields |
+| --- | --- |
+| OpenAI | `model`, `stream`, `stream_options`, `messages` |
+| Anthropic | `model`, `stream`, `messages`, `system` |
+
+The route layer owns those fields so callers cannot override the selected model
+or replace the rendered document bundle accidentally.
+
+## Prompt Templates
+
+Templates use `{{placeholder}}` syntax. Placeholders refer to workflow document
+roles, and roles map to uploaded document ids.
+
+```json
+{
+  "documents": {
+    "readme": "readme",
+    "spec": "spec",
+    "implementation": "impl"
+  },
+  "template": "Read the README:\n\n{{readme}}\n\nReview the spec:\n\n{{spec}}",
+  "template_with_impl": "Read implementation notes:\n\n{{implementation}}\n\nReview the spec:\n\n{{spec}}",
+  "impl_every_n": 4
+}
+```
+
+If `template` is omitted, the Worker uses a built-in review template that
+references `{{readme}}` and `{{spec}}`. If implementation review is enabled,
+the built-in implementation template also references `{{implementation}}`.
+
+Implementation context is selected when:
+
+- `impl_every_n` divides the round number, such as rounds 4, 8, and 12
+- `include_impl: true` is supplied to `POST /run`
+
+Warnings are returned when a configured role is not referenced by the selected
+template. Missing referenced roles or missing uploaded documents are hard
+validation errors.
+
+## Round Lifecycle
+
+`POST /run/:workflow/:round` performs these steps:
+
+1. Validate workflow name and round number.
+2. Load the workflow config from KV.
+3. Parse optional run overrides.
+4. Enforce sequential rounds unless `skip_sequence_check` is true.
+5. Check whether the target round is complete, running, failed, or stale.
+6. Acquire a workflow lock with `DEFAULT_LOCK_TTL_SECONDS`.
+7. Select the template and implementation inclusion mode.
+8. Render the prompt by reading documents from KV.
+9. Write a `running` round record.
+10. Call the selected provider API with `stream: true`.
+11. Parse provider SSE events into normalized text and usage.
+12. Reject empty or incomplete provider responses.
+13. Compute document metrics.
+14. Compute convergence against cached stats.
+15. Save the completed round.
+16. Update stats and workflow metadata.
+17. Release the lock.
+18. Return the normalized JSON response.
+
+The provider APIs stream to the Worker, and the Worker parses those SSE
+responses internally. The public `POST /run` response is returned when the
+provider stream has completed and the round has been saved.
+
+## Retry and Lock Semantics
+
+Round behavior is deliberately conservative:
+
+| Existing round status | `POST /run` behavior |
+| --- | --- |
+| missing | proceed |
+| `complete` | `409 conflict` |
+| `running` within TTL | `409 conflict` |
+| `running` beyond TTL | retry allowed |
+| `failed` | retry allowed |
+| `stale` | retry allowed |
+
+KV does not provide compare-and-swap, so locks are best-effort. In the intended
+single-tenant use case, the lock prevents accidental duplicate runs and makes
+normal retry behavior predictable.
+
+## Convergence Algorithm
+
+Convergence is computed after every completed round starting with round 2.
+
+```
+score = (0.35 * output_trend)
+      + (0.35 * change_velocity)
+      + (0.30 * similarity_trend)
+```
+
+The three signals are:
+
+- `output_trend`: whether the latest review output is shorter than the largest
+  output seen so far
+- `change_velocity`: whether word-count deltas between rounds are shrinking
+- `similarity_trend`: Jaccard similarity between consecutive round word sets
+
+The recommendation thresholds are:
+
+| Score | Estimated remaining rounds | Recommendation |
+| ---: | --- | --- |
+| `>= 0.90` | `0` | `stop` |
+| `>= 0.75` | `1-2` | `almost` |
+| `>= 0.50` | `3-5` | `continue` |
+| `< 0.50` | `5+` | `early` |
+
+Round 1 returns `null` convergence fields. The stats cache stores only the
+latest word set needed for the next similarity calculation, so the Worker does
+not need to re-read all prior round content after every run.
+
+## Document Metrics
+
+Each completed round stores:
+
+| Metric | Meaning |
+| --- | --- |
+| `words` | Whitespace-delimited token count |
+| `lines` | Line count |
+| `characters` | UTF-8 byte length |
+| `headings` | Markdown headings matching `#` through `######` with a space |
+
+These metrics support convergence, quick round inspection, and basic output
+quality checks.
+
+## Storage Schema
+
+All keys live in the `APRP` KV namespace.
+
+| Key pattern | Value |
+| --- | --- |
+| `config::<workflow>` | Workflow JSON |
+| `doc::<workflow>::<role>` | Raw document text |
+| `round::<workflow>::<N>` | Round JSON |
+| `meta::<workflow>` | Round count, latest round, latest convergence |
+| `stats::<workflow>` | Cached convergence analytics |
+| `lock::<workflow>` | Active run lock |
+
+Document uploads are capped by `MAX_DOCUMENT_BYTES`, which defaults to
+`1048576` bytes. Small documents under 500 bytes succeed with a warning because
+that often indicates a stub or wrong file was uploaded.
+
+## Deployment
+
+Prerequisites:
+
+- Rust stable toolchain
+- `wasm32-unknown-unknown` target
+- `worker-build`
+- Wrangler CLI
+- Cloudflare Workers account
+- Cloudflare KV namespace
+
+Create the KV namespace:
+
+```bash
+wrangler kv namespace create APRP
+```
+
+Put the returned namespace id into `wrangler.toml`:
+
+```toml
+[[kv_namespaces]]
+binding = "APRP"
+id = "<namespace-id>"
+```
+
+Set secrets:
+
+```bash
+wrangler secret put CSVKEY
+wrangler secret put OPENAI_API_KEY
+wrangler secret put ANTHROPIC_API_KEY
+```
+
+Deploy:
+
+```bash
+wrangler deploy
+```
+
+Verify the deployed Worker:
+
+```bash
+./scripts/verify-deploy.sh "https://rusty-convergence.<your-subdomain>.workers.dev" "$CSVKEY"
+```
+
+## Local Development
+
+Create `.dev.vars` for local use:
+
+```env
+CSVKEY=test-key-for-dev
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Start Wrangler:
+
+```bash
+wrangler dev
+```
+
+Run local checks:
+
+```bash
+cargo fmt --check
+cargo test --all-targets
+worker-build --release
+wrangler deploy --dry-run
+```
+
+The repository also includes deployed-worker smoke tests:
+
+```bash
+./scripts/verify-deploy.sh "$WORKER_URL" "$CSVKEY"
+./tests/e2e_error_sweep.sh
+CSVKEY="$CSVKEY" \
+WORKER_URL="$WORKER_URL" \
+OPENAI_API_KEY="$OPENAI_API_KEY" \
+ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+ANTHROPIC_MODEL="<anthropic-model-id>" \
+./tests/e2e_real_llm.sh
+```
+
+The real-LLM test makes billable provider calls. It creates separate OpenAI and
+Anthropic workflows, runs real rounds, validates persisted round data, checks
+stats, and cleans up the workflows at exit.
+
+## Security Model
+
+- Single shared `CSVKEY` authenticates all non-health routes.
+- Provider keys are Worker secrets and are not stored in KV.
+- User documents and LLM outputs are stored in the configured KV namespace.
+- Workflow names, role names, and round numbers are validated before storage.
+- Document size is bounded by `MAX_DOCUMENT_BYTES`.
+- Provider errors are truncated before they are returned to callers.
+- The service sends no CORS headers; it is intended for server-side and CLI
+  callers rather than direct browser use.
+
+## Operational Notes
+
+- Upload documents before creating a workflow that references them.
+- Use model ids enabled for the relevant provider account.
+- Use `skip_sequence_check` only for backfills or intentional experiments.
+- Rebuild stats with `POST /stats/:workflow/rebuild` if stats and rounds ever
+  become inconsistent.
+- Retrieve round markdown with `Accept: text/markdown` when you want only the
+  LLM output without the JSON envelope.
+- Delete workflows through the API rather than deleting individual KV keys by
+  hand.
+
+## What This Does Not Do
+
+Rusty Convergence intentionally avoids several responsibilities:
+
+- no browser automation
+- no local project filesystem access at runtime
+- no git commits, branches, pushes, or patches
+- no dashboard or TUI
+- no multi-user account model
+- no prompt library management beyond saved workflow templates
+- no automatic retry of expensive LLM calls
+- no server-side diff rendering
+
+Those concerns belong in callers or future companion tools. The Worker stays
+small, durable, and easy to operate.
+
+## License
+
+This repository is currently developed as project infrastructure for Rusty
+Convergence/APRP. Add a license file before distributing it outside the current
+project context.
