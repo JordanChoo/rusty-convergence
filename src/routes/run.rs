@@ -78,8 +78,7 @@ pub struct RoundCompletionSummary {
     pub lines: u32,
     pub characters: u32,
     pub headings: u32,
-    pub convergence_score: Option<f64>,
-    pub recommendation: Option<String>,
+    pub convergence: crate::types::ConvergenceData,
     pub duration_seconds: u64,
 }
 
@@ -134,8 +133,7 @@ pub async fn on_round_complete(
         lines: metrics.lines,
         characters: metrics.characters,
         headings: metrics.headings,
-        convergence_score: convergence.score,
-        recommendation: convergence.recommendation,
+        convergence,
         duration_seconds: duration,
     })
 }
@@ -605,14 +603,12 @@ pub async fn handle(
                 "headings": summary.headings,
             },
             "convergence": {
-                "score": summary.convergence_score,
-                "estimated_remaining_rounds": summary.recommendation.as_deref().map(|r| match r {
-                    "stop" => "0",
-                    "almost" => "1-2",
-                    "continue" => "3-5",
-                    _ => "5+",
-                }),
-                "recommendation": summary.recommendation,
+                "score": summary.convergence.score,
+                "output_trend": summary.convergence.output_trend,
+                "change_velocity": summary.convergence.change_velocity,
+                "similarity_trend": summary.convergence.similarity_trend,
+                "estimated_remaining_rounds": summary.convergence.estimated_remaining_rounds,
+                "recommendation": summary.convergence.recommendation,
             },
             "usage": usage,
             "provider": provider,

@@ -87,8 +87,14 @@ fn test_metrics_across_rounds() {
         );
     }
 
-    assert!(metrics[0].words > metrics[4].words, "Words should decrease over rounds");
-    assert!(metrics[0].headings > metrics[4].headings, "Headings should decrease over rounds");
+    assert!(
+        metrics[0].words > metrics[4].words,
+        "Words should decrease over rounds"
+    );
+    assert!(
+        metrics[0].headings > metrics[4].headings,
+        "Headings should decrease over rounds"
+    );
 
     for m in &metrics {
         assert!(m.words > 0);
@@ -109,7 +115,10 @@ fn test_convergence_signals_across_rounds() {
     // Output trend should be positive (words are decreasing)
     let trend = compute_output_trend(&word_counts);
     println!("Output trend: {trend:.4}");
-    assert!(trend > 0.0, "Output trend should be positive (decreasing word counts)");
+    assert!(
+        trend > 0.0,
+        "Output trend should be positive (decreasing word counts)"
+    );
     assert!(trend < 1.0, "Output trend should be less than 1.0");
 
     // Change velocity should be positive (deltas exist)
@@ -177,7 +186,10 @@ fn test_convergence_score_trajectory() {
 
     // Verify score increases over time (convergence)
     let defined_scores: Vec<f64> = scores.iter().filter_map(|s| *s).collect();
-    assert!(defined_scores.len() >= 3, "Should have at least 3 scored rounds");
+    assert!(
+        defined_scores.len() >= 3,
+        "Should have at least 3 scored rounds"
+    );
 
     // Later scores should generally be higher than earlier ones
     let first = defined_scores[0];
@@ -220,7 +232,13 @@ fn test_convergence_round_2_has_score() {
     let c = compute_convergence(ot, cv, st);
     assert!(c.score.is_some(), "Round 2 should have a convergence score");
     let score = c.score.unwrap();
-    assert!(score >= 0.0 && score <= 1.0, "Score should be in [0, 1]: {score}");
+    assert!(
+        score >= 0.0 && score <= 1.0,
+        "Score should be in [0, 1]: {score}"
+    );
     assert!(c.recommendation.is_some());
-    println!("Round 2 score: {score:.4}, recommendation: {}", c.recommendation.unwrap());
+    println!(
+        "Round 2 score: {score:.4}, recommendation: {}",
+        c.recommendation.unwrap()
+    );
 }

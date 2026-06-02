@@ -14,14 +14,29 @@ use crate::types::{Meta, Workflow};
 use crate::validation::validate_workflow_name;
 
 pub async fn handle_create(kv: KvStore, mut req: Request) -> Result<Response> {
-    let body: serde_json::Value = req
-        .json()
-        .await
-        .map_err(|_| Error::RustError("Invalid JSON body".into()))?;
+    let body: serde_json::Value = match req.json().await {
+        Ok(v) => v,
+        Err(_) => {
+            return json_error(
+                400,
+                "Invalid or missing JSON body",
+                "bad_request",
+                Some("Request body must be valid JSON with Content-Type: application/json"),
+            );
+        }
+    };
 
-    let name = body["name"]
-        .as_str()
-        .ok_or_else(|| Error::RustError("missing name".into()))?;
+    let name = match body["name"].as_str() {
+        Some(n) => n,
+        None => {
+            return json_error(
+                400,
+                "Missing or non-string required field: name",
+                "bad_request",
+                None,
+            );
+        }
+    };
 
     if let Err(resp) = validate_workflow_name(name) {
         return Ok(resp);
