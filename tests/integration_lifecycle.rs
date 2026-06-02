@@ -242,3 +242,57 @@ fn test_convergence_round_2_has_score() {
         c.recommendation.unwrap()
     );
 }
+
+// === Adversarial edge case probes ===
+
+#[test]
+fn probe_metrics_only_newlines() {
+    let m = compute_metrics("\n\n\n");
+    assert_eq!(m.words, 0);
+    assert_eq!(m.characters, 3);
+}
+
+#[test]
+fn probe_metrics_crlf() {
+    let m = compute_metrics("hello\r\nworld");
+    assert_eq!(m.words, 2);
+    assert_eq!(m.lines, 2);
+}
+
+#[test]
+fn probe_tokenize_markdown_fences() {
+    let set = tokenize_to_word_set("```rust\nfn main() {}\n```");
+    assert!(set.contains("rust"), "should extract 'rust' from ```rust");
+    assert!(set.contains("fn"));
+    assert!(!set.contains("```"), "pure punctuation should be filtered");
+}
+
+#[test]
+fn probe_extract_adjacent_placeholders() {
+    use rusty_convergence::prompt::extract_placeholders;
+    let p = extract_placeholders("{{a}}{{b}}");
+    assert_eq!(p, vec!["a", "b"]);
+}
+
+#[test]
+fn probe_extract_placeholder_only() {
+    use rusty_convergence::prompt::extract_placeholders;
+    let p = extract_placeholders("{{x}}");
+    assert_eq!(p, vec!["x"]);
+}
+
+#[test]
+fn probe_convergence_two_identical_then_different() {
+    let cv = compute_change_velocity(&[1000, 1000, 500]);
+    assert!((cv - 0.0).abs() < 0.001, "velocity should be 0 when latest delta IS the max, got {cv}");
+}
+
+#[test]
+fn probe_convergence_spike_then_settle() {
+    let ot = compute_output_trend(&[1000, 3000, 1000, 1000]);
+    let expected = 1.0 - (1000.0 / 3000.0);
+    assert!((ot - expected).abs() < 0.001, "ot={ot}, expected={expected}");
+
+    let cv = compute_change_velocity(&[1000, 3000, 1000, 1000]);
+    assert_eq!(cv, 1.0, "latest delta is 0, should be perfect velocity");
+}
