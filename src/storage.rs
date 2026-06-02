@@ -104,6 +104,46 @@ pub async fn kv_list_by_prefix(
     Ok((keys, next_cursor))
 }
 
+use crate::error::now_iso8601;
+use crate::types::Lock;
+
+pub async fn acquire_lock(
+    kv: &KvStore,
+    workflow: &str,
+    round: u32,
+    ttl_seconds: u64,
+) -> Result<std::result::Result<(), Lock>> {
+    let key = lock_key(workflow);
+    if let Some(existing) = kv_get::<Lock>(kv, &key).await? {
+        return Ok(Err(existing));
+    }
+    let now = now_iso8601();
+    let lock = Lock {
+        round,
+        started_at: now.clone(),
+        expires_at: format_expiry(&now, ttl_seconds),
+    };
+    kv_put_with_ttl(kv, &key, &lock, ttl_seconds).await?;
+    Ok(Ok(()))
+}
+
+pub async fn release_lock(kv: &KvStore, workflow: &str) -> Result<()> {
+    kv_delete(kv, &lock_key(workflow)).await
+}
+
+pub async fn check_lock(kv: &KvStore, workflow: &str) -> Result<Option<Lock>> {
+    kv_get::<Lock>(kv, &lock_key(workflow)).await
+}
+
+fn format_expiry(started_at: &str, ttl_seconds: u64) -> String {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(started_at) {
+        let expiry = dt + chrono::Duration::seconds(ttl_seconds as i64);
+        expiry.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    } else {
+        "unknown".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
