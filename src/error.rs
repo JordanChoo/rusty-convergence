@@ -15,8 +15,15 @@ fn truncate(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
-fn now_iso8601() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+pub fn now_iso8601() -> String {
+    let millis = Date::now().as_millis();
+    format_millis_as_iso8601(millis)
+}
+
+fn format_millis_as_iso8601(millis: u64) -> String {
+    let secs = (millis / 1000) as i64;
+    let dt = chrono::DateTime::from_timestamp(secs, 0).unwrap_or_default();
+    dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 pub fn json_error(
@@ -95,5 +102,17 @@ mod tests {
     #[test]
     fn test_truncate_empty() {
         assert_eq!(truncate("", 10), "");
+    }
+
+    #[test]
+    fn test_format_millis_as_iso8601() {
+        let ts = format_millis_as_iso8601(1630611511000);
+        assert_eq!(ts, "2021-09-02T19:38:31Z");
+    }
+
+    #[test]
+    fn test_format_millis_as_iso8601_epoch() {
+        let ts = format_millis_as_iso8601(0);
+        assert_eq!(ts, "1970-01-01T00:00:00Z");
     }
 }
