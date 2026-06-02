@@ -4,7 +4,7 @@ use worker::*;
 
 use crate::error::{json_error, success_response};
 use crate::routes::run::{default_lock_ttl, effective_status};
-use crate::storage::{config_key, kv_get, kv_list_by_prefix, parse_round_number_from_key, round_key};
+use crate::storage::{config_key, kv_get, kv_list_by_prefix, round_key};
 use crate::types::{Round, RoundStatus, Workflow};
 use crate::validation::parse_and_validate_round;
 
