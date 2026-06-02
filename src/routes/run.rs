@@ -25,6 +25,7 @@ pub fn default_lock_ttl(env: &Env) -> u64 {
         .ok()
         .and_then(|v| v.to_string().parse().ok())
         .unwrap_or(3600)
+        .min(86400) // cap at 24 hours to prevent i64 overflow in chrono::Duration
 }
 
 pub async fn check_round_status(

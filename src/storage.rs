@@ -152,7 +152,8 @@ pub async fn check_lock(kv: &KvStore, workflow: &str) -> Result<Option<Lock>> {
 
 fn format_expiry(started_at: &str, ttl_seconds: u64) -> String {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(started_at) {
-        let expiry = dt + chrono::Duration::seconds(ttl_seconds as i64);
+        let clamped = ttl_seconds.min(86400) as i64;
+        let expiry = dt + chrono::Duration::seconds(clamped);
         expiry.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     } else {
         "unknown".to_string()
