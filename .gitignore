@@ -1,0 +1,32 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Cloudflare Workers
+/build/
+/worker/
+node_modules/
+.wrangler/
+
+# Secrets
+.dev.vars
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local workspace
+.ntm/
+cursor.mcp.json
+factory.mcp.json
+gemini.mcp.json
+windsurf.mcp.json
+.claude/settings.local.json
+repo/
