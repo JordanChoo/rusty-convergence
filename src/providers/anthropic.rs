@@ -164,13 +164,27 @@ mod tests {
             "system": "hacked system prompt",
             "thinking": {"type": "enabled", "budget_tokens": 32000}
         });
-        let body = build_request_body("claude-opus-4-6", Some("real system"), "Hello", Some(&params));
+        let body = build_request_body(
+            "claude-opus-4-6",
+            Some("real system"),
+            "Hello",
+            Some(&params),
+        );
         assert_eq!(body["stream"], true, "stream must not be overridable");
-        assert_eq!(body["model"], "claude-opus-4-6", "model must not be overridable");
+        assert_eq!(
+            body["model"], "claude-opus-4-6",
+            "model must not be overridable"
+        );
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 1, "messages must not be overridable");
-        assert_eq!(body["system"], "real system", "system must not be overridable via params");
-        assert_eq!(body["thinking"]["type"], "enabled", "non-protected params should work");
+        assert_eq!(
+            body["system"], "real system",
+            "system must not be overridable via params"
+        );
+        assert_eq!(
+            body["thinking"]["type"], "enabled",
+            "non-protected params should work"
+        );
     }
 
     #[test]

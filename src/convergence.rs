@@ -104,13 +104,18 @@ pub async fn write_stats(kv: &KvStore, workflow: &str, stats: &Stats) -> worker:
     kv_put(kv, &stats_key(workflow), stats).await
 }
 
-pub async fn update_stats_after_round(
+pub struct ComputedConvergence {
+    pub convergence: ConvergenceData,
+    pub updated_stats: Stats,
+}
+
+pub async fn compute_stats_update(
     kv: &KvStore,
     workflow: &str,
     round_number: u32,
     content: &str,
     word_count: u32,
-) -> worker::Result<ConvergenceData> {
+) -> worker::Result<ComputedConvergence> {
     let mut stats = read_stats(kv, workflow).await?.unwrap_or_else(|| Stats {
         workflow: workflow.to_string(),
         total_rounds: 0,
@@ -160,9 +165,18 @@ pub async fn update_stats_after_round(
     stats.latest_word_set = Some(current_word_set);
     stats.updated_at = now_iso8601();
 
-    write_stats(kv, workflow, &stats).await?;
+    Ok(ComputedConvergence {
+        convergence,
+        updated_stats: stats,
+    })
+}
 
-    Ok(convergence)
+pub async fn commit_stats(
+    kv: &KvStore,
+    workflow: &str,
+    stats: &Stats,
+) -> worker::Result<()> {
+    write_stats(kv, workflow, stats).await
 }
 
 pub async fn update_meta_after_round(

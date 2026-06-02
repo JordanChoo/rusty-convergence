@@ -3,7 +3,7 @@ use serde_json::json;
 use worker::kv::KvStore;
 use worker::*;
 
-use crate::convergence::{update_meta_after_round, update_stats_after_round};
+use crate::convergence::{commit_stats, compute_stats_update, update_meta_after_round};
 use crate::error::{json_error, now_iso8601, success_response};
 use crate::metrics::compute_metrics;
 use crate::prompt::{render_template, select_template, RenderError};
@@ -97,12 +97,14 @@ pub async fn on_round_complete(
 ) -> Result<RoundCompletionSummary> {
     let metrics = compute_metrics(content);
 
-    let convergence =
-        update_stats_after_round(kv, workflow, round_num, content, metrics.words).await?;
+    let computed =
+        compute_stats_update(kv, workflow, round_num, content, metrics.words).await?;
 
     let completed_at = now_iso8601();
     let duration = compute_duration(started_at, &completed_at);
 
+    // Write round record FIRST — this is the most critical write.
+    // If it fails, stats/meta are not yet updated, so no phantom entries.
     let complete_round = Round {
         workflow: workflow.to_string(),
         round: round_num,
@@ -110,7 +112,7 @@ pub async fn on_round_complete(
         content: Some(content.to_string()),
         partial_content: None,
         metrics: Some(metrics.clone()),
-        convergence: Some(convergence.clone()),
+        convergence: Some(computed.convergence.clone()),
         usage,
         provider: provider.to_string(),
         model: model.to_string(),
@@ -124,7 +126,9 @@ pub async fn on_round_complete(
 
     kv_put(kv, &round_key(workflow, round_num), &complete_round).await?;
 
-    update_meta_after_round(kv, workflow, round_num, convergence.score).await?;
+    // Stats and meta are recoverable via POST /stats/rebuild if these fail.
+    commit_stats(kv, workflow, &computed.updated_stats).await?;
+    update_meta_after_round(kv, workflow, round_num, computed.convergence.score).await?;
 
     release_lock(kv, workflow).await?;
 
@@ -133,7 +137,7 @@ pub async fn on_round_complete(
         lines: metrics.lines,
         characters: metrics.characters,
         headings: metrics.headings,
-        convergence,
+        convergence: computed.convergence,
         completed_at,
         duration_seconds: duration,
     })

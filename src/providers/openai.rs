@@ -161,7 +161,10 @@ mod tests {
         assert_eq!(body["model"], "o3", "model must not be overridable");
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 1, "messages must not be overridable");
-        assert_eq!(body["reasoning_effort"], "high", "non-protected params should work");
+        assert_eq!(
+            body["reasoning_effort"], "high",
+            "non-protected params should work"
+        );
     }
 
     #[test]
