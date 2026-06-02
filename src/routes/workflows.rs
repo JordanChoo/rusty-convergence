@@ -11,7 +11,7 @@ use crate::storage::{
     meta_key, stats_key,
 };
 use crate::types::{Meta, Workflow};
-use crate::validation::validate_workflow_name;
+use crate::validation::{check_role_name, validate_workflow_name};
 
 pub async fn handle_create(kv: KvStore, mut req: Request) -> Result<Response> {
     let body: serde_json::Value = match req.json().await {
@@ -99,6 +99,30 @@ pub async fn handle_create(kv: KvStore, mut req: Request) -> Result<Response> {
         }
     };
 
+    for (role_name, role_id) in &documents {
+        if let Err(e) = check_role_name(role_name) {
+            return json_error(
+                400,
+                &format!("Invalid document role name '{}': {}", role_name, e.message),
+                "bad_request",
+                None,
+            );
+        }
+        if let Err(e) = check_role_name(role_id) {
+            return json_error(
+                400,
+                &format!(
+                    "Invalid document role identifier '{}' for role '{}': {}",
+                    role_id, role_name, e.message
+                ),
+                "bad_request",
+                Some(
+                    "Role identifiers must be alphanumeric, hyphens, or underscores (max 32 chars)",
+                ),
+            );
+        }
+    }
+
     let template_placeholders = extract_placeholders(effective_template);
     for placeholder in &template_placeholders {
         if !documents.contains_key(placeholder.as_str()) {
@@ -185,7 +209,9 @@ pub async fn handle_create(kv: KvStore, mut req: Request) -> Result<Response> {
         documents,
         template,
         template_with_impl,
-        impl_every_n: body["impl_every_n"].as_u64().map(|n| n as u32),
+        impl_every_n: body["impl_every_n"]
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok()),
     };
 
     let key = config_key(name);

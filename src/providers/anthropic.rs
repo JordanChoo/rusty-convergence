@@ -3,6 +3,8 @@ use serde_json::json;
 use super::{ProviderError, SseEvent, StreamChunk};
 use crate::types::UsageStats;
 
+const PROTECTED_FIELDS: &[&str] = &["model", "stream", "messages", "system"];
+
 pub fn build_request_body(
     model: &str,
     system_prompt: Option<&str>,
@@ -24,14 +26,13 @@ pub fn build_request_body(
         if let Some(obj) = params.as_object() {
             if let Some(body_obj) = body.as_object_mut() {
                 for (k, v) in obj {
-                    body_obj.insert(k.clone(), v.clone());
+                    if !PROTECTED_FIELDS.contains(&k.as_str()) {
+                        body_obj.insert(k.clone(), v.clone());
+                    }
                 }
             }
         }
     }
-
-    // Force streaming — the Worker depends on SSE format for response parsing.
-    body["stream"] = json!(true);
 
     body
 }
@@ -152,6 +153,24 @@ mod tests {
     fn test_build_request_without_system() {
         let body = build_request_body("claude-opus-4-6", None, "Hello", None);
         assert!(body.get("system").is_none());
+    }
+
+    #[test]
+    fn test_provider_params_cannot_override_protected_fields() {
+        let params = json!({
+            "stream": false,
+            "messages": [],
+            "model": "hacked-model",
+            "system": "hacked system prompt",
+            "thinking": {"type": "enabled", "budget_tokens": 32000}
+        });
+        let body = build_request_body("claude-opus-4-6", Some("real system"), "Hello", Some(&params));
+        assert_eq!(body["stream"], true, "stream must not be overridable");
+        assert_eq!(body["model"], "claude-opus-4-6", "model must not be overridable");
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1, "messages must not be overridable");
+        assert_eq!(body["system"], "real system", "system must not be overridable via params");
+        assert_eq!(body["thinking"]["type"], "enabled", "non-protected params should work");
     }
 
     #[test]

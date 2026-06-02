@@ -3,6 +3,8 @@ use serde_json::json;
 use super::{ProviderError, SseEvent, StreamChunk};
 use crate::types::UsageStats;
 
+const PROTECTED_FIELDS: &[&str] = &["model", "stream", "stream_options", "messages"];
+
 pub fn build_request_body(
     model: &str,
     system_prompt: Option<&str>,
@@ -26,16 +28,13 @@ pub fn build_request_body(
         if let Some(obj) = params.as_object() {
             if let Some(body_obj) = body.as_object_mut() {
                 for (k, v) in obj {
-                    body_obj.insert(k.clone(), v.clone());
+                    if !PROTECTED_FIELDS.contains(&k.as_str()) {
+                        body_obj.insert(k.clone(), v.clone());
+                    }
                 }
             }
         }
     }
-
-    // Force streaming — the Worker depends on SSE format for response parsing.
-    // provider_params must not override these.
-    body["stream"] = json!(true);
-    body["stream_options"] = json!({"include_usage": true});
 
     body
 }
@@ -147,6 +146,22 @@ mod tests {
             }
             other => panic!("Expected Usage, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_provider_params_cannot_override_protected_fields() {
+        let params = json!({
+            "stream": false,
+            "messages": [],
+            "model": "hacked-model",
+            "reasoning_effort": "high"
+        });
+        let body = build_request_body("o3", None, "Hello", Some(&params));
+        assert_eq!(body["stream"], true, "stream must not be overridable");
+        assert_eq!(body["model"], "o3", "model must not be overridable");
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1, "messages must not be overridable");
+        assert_eq!(body["reasoning_effort"], "high", "non-protected params should work");
     }
 
     #[test]
