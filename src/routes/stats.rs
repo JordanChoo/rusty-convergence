@@ -88,16 +88,22 @@ pub async fn handle_rebuild(kv: KvStore, workflow: &str) -> Result<Response> {
     }
 
     let prefix = format!("round::{workflow}::");
-    let (keys, _) = kv_list_by_prefix(&kv, &prefix, 100, None).await?;
-
     let mut completed_rounds: Vec<(u32, String, u32)> = Vec::new();
-    for key in &keys {
-        if let Some(round) = kv_get::<Round>(&kv, key).await? {
-            if round.status == RoundStatus::Complete {
-                let content = round.content.unwrap_or_default();
-                let words = round.metrics.map(|m| m.words).unwrap_or(0);
-                completed_rounds.push((round.round, content, words));
+    let mut cursor: Option<String> = None;
+    loop {
+        let (keys, next) = kv_list_by_prefix(&kv, &prefix, 100, cursor.as_deref()).await?;
+        for key in &keys {
+            if let Some(round) = kv_get::<Round>(&kv, key).await? {
+                if round.status == RoundStatus::Complete {
+                    let content = round.content.unwrap_or_default();
+                    let words = round.metrics.map(|m| m.words).unwrap_or(0);
+                    completed_rounds.push((round.round, content, words));
+                }
             }
+        }
+        cursor = next;
+        if cursor.is_none() {
+            break;
         }
     }
 

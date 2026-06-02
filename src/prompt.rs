@@ -97,11 +97,9 @@ pub fn select_template(
 ) -> (&str, bool) {
     let include_impl = match include_impl_override {
         Some(v) => v,
-        None => {
-            workflow
-                .impl_every_n
-                .map_or(false, |n| n > 0 && round % n == 0)
-        }
+        None => workflow
+            .impl_every_n
+            .map_or(false, |n| n > 0 && round % n == 0),
     };
 
     let template = if include_impl {
@@ -111,10 +109,7 @@ pub fn select_template(
             .or(workflow.template.as_deref())
             .unwrap_or(DEFAULT_TEMPLATE_WITH_IMPL)
     } else {
-        workflow
-            .template
-            .as_deref()
-            .unwrap_or(DEFAULT_TEMPLATE)
+        workflow.template.as_deref().unwrap_or(DEFAULT_TEMPLATE)
     };
 
     (template, include_impl)

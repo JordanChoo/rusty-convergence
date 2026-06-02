@@ -32,7 +32,12 @@ pub fn parse_round_number_from_key(key: &str) -> Option<u32> {
 }
 
 pub async fn kv_get<T: DeserializeOwned>(kv: &KvStore, key: &str) -> Result<Option<T>> {
-    match kv.get(key).text().await.map_err(|e| Error::RustError(e.to_string()))? {
+    match kv
+        .get(key)
+        .text()
+        .await
+        .map_err(|e| Error::RustError(e.to_string()))?
+    {
         Some(text) => {
             let val: T = serde_json::from_str(&text)
                 .map_err(|e| Error::RustError(format!("KV deserialize error for {key}: {e}")))?;
@@ -43,7 +48,10 @@ pub async fn kv_get<T: DeserializeOwned>(kv: &KvStore, key: &str) -> Result<Opti
 }
 
 pub async fn kv_get_text(kv: &KvStore, key: &str) -> Result<Option<String>> {
-    kv.get(key).text().await.map_err(|e| Error::RustError(e.to_string()))
+    kv.get(key)
+        .text()
+        .await
+        .map_err(|e| Error::RustError(e.to_string()))
 }
 
 pub async fn kv_put<T: Serialize>(kv: &KvStore, key: &str, value: &T) -> Result<()> {
@@ -81,7 +89,9 @@ pub async fn kv_put_with_ttl<T: Serialize>(
 }
 
 pub async fn kv_delete(kv: &KvStore, key: &str) -> Result<()> {
-    kv.delete(key).await.map_err(|e| Error::RustError(e.to_string()))
+    kv.delete(key)
+        .await
+        .map_err(|e| Error::RustError(e.to_string()))
 }
 
 pub async fn kv_list_by_prefix(
@@ -94,7 +104,10 @@ pub async fn kv_list_by_prefix(
     if let Some(c) = cursor {
         builder = builder.cursor(c.to_string());
     }
-    let result = builder.execute().await.map_err(|e| Error::RustError(e.to_string()))?;
+    let result = builder
+        .execute()
+        .await
+        .map_err(|e| Error::RustError(e.to_string()))?;
     let keys: Vec<String> = result.keys.into_iter().map(|k| k.name).collect();
     let next_cursor = if result.list_complete {
         None

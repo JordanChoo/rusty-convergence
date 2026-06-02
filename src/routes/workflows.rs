@@ -70,7 +70,12 @@ pub async fn handle_create(kv: KvStore, mut req: Request) -> Result<Response> {
             .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
             .collect(),
         Some(_) => {
-            return json_error(400, "Field 'documents' must be an object", "bad_request", None);
+            return json_error(
+                400,
+                "Field 'documents' must be an object",
+                "bad_request",
+                None,
+            );
         }
         None => {
             let has_impl_placeholder =
@@ -286,14 +291,10 @@ pub async fn handle_delete(kv: KvStore, name: &str) -> Result<Response> {
     kv_delete(&kv, &key).await?;
     let mut keys_removed: u32 = 1;
 
-    for prefix in &[
-        format!("round::{}::", name),
-        format!("doc::{}::", name),
-    ] {
+    for prefix in &[format!("round::{}::", name), format!("doc::{}::", name)] {
         let mut cursor: Option<String> = None;
         loop {
-            let (keys, next) =
-                kv_list_by_prefix(&kv, prefix, 100, cursor.as_deref()).await?;
+            let (keys, next) = kv_list_by_prefix(&kv, prefix, 100, cursor.as_deref()).await?;
             for k in &keys {
                 if kv_delete(&kv, k).await.is_ok() {
                     keys_removed += 1;

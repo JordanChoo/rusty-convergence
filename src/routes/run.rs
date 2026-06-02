@@ -9,9 +9,7 @@ use crate::metrics::compute_metrics;
 use crate::prompt::{render_template, select_template, RenderError};
 use crate::providers::parse_sse_events;
 use crate::providers::StreamChunk;
-use crate::storage::{
-    acquire_lock, config_key, kv_get, kv_put, release_lock, round_key,
-};
+use crate::storage::{acquire_lock, config_key, kv_get, kv_put, release_lock, round_key};
 use crate::types::{Round, RoundStatus, RunOverrides, UsageStats, Workflow};
 use crate::validation::parse_and_validate_round;
 
@@ -187,7 +185,11 @@ fn compute_duration(started_at: &str, completed_at: &str) -> u64 {
         return 0;
     };
     let diff = end.timestamp() - start.timestamp();
-    if diff > 0 { diff as u64 } else { 0 }
+    if diff > 0 {
+        diff as u64
+    } else {
+        0
+    }
 }
 
 pub async fn handle(
@@ -259,16 +261,24 @@ pub async fn handle(
         RoundAction::Conflict(msg) => return json_error(409, &msg, "conflict", None),
     }
 
+    if let Err(existing) = acquire_lock(&kv, workflow, round, lock_ttl).await? {
+        return json_error(
+            409,
+            &format!(
+                "Workflow '{}' is locked by round {} (started at {})",
+                workflow, existing.round, existing.started_at
+            ),
+            "conflict",
+            Some("Use GET /rounds to check status, or wait for the lock to expire"),
+        );
+    }
+
     let provider = overrides
         .provider
         .as_deref()
         .unwrap_or(&wf.provider)
         .to_string();
-    let model = overrides
-        .model
-        .as_deref()
-        .unwrap_or(&wf.model)
-        .to_string();
+    let model = overrides.model.as_deref().unwrap_or(&wf.model).to_string();
     let system_prompt = overrides
         .system_prompt
         .as_ref()
@@ -309,42 +319,33 @@ pub async fn handle(
     let (rendered_prompt, template_warnings) =
         match render_template(template, workflow, &documents, &kv).await {
             Ok(r) => r,
-            Err(RenderError::MissingRole(role)) => {
-                return json_error(
-                    422,
-                    &format!("Template references role '{role}' which is not in the documents map"),
-                    "validation_failed",
-                    None,
-                )
-            }
-            Err(RenderError::MissingDocument(role, doc_role)) => {
-                return json_error(
-                    422,
-                    &format!(
-                        "Document for role '{role}' (key: doc::{workflow}::{doc_role}) not found in KV"
+            Err(e) => {
+                let _ = release_lock(&kv, workflow).await;
+                return match e {
+                    RenderError::MissingRole(role) => json_error(
+                        422,
+                        &format!(
+                            "Template references role '{role}' which is not in the documents map"
+                        ),
+                        "validation_failed",
+                        None,
                     ),
-                    "validation_failed",
-                    Some(&format!(
-                        "Upload it with PUT /documents/{workflow}/{doc_role}"
-                    )),
-                )
-            }
-            Err(RenderError::KvError(e)) => {
-                return json_error(500, &format!("KV error: {e}"), "internal_error", None)
+                    RenderError::MissingDocument(role, doc_role) => json_error(
+                        422,
+                        &format!(
+                            "Document for role '{role}' (key: doc::{workflow}::{doc_role}) not found in KV"
+                        ),
+                        "validation_failed",
+                        Some(&format!(
+                            "Upload it with PUT /documents/{workflow}/{doc_role}"
+                        )),
+                    ),
+                    RenderError::KvError(e) => {
+                        json_error(500, &format!("KV error: {e}"), "internal_error", None)
+                    }
+                };
             }
         };
-
-    if let Err(existing) = acquire_lock(&kv, workflow, round, lock_ttl).await? {
-        return json_error(
-            409,
-            &format!(
-                "Workflow '{}' is locked by round {} (started at {})",
-                workflow, existing.round, existing.started_at
-            ),
-            "conflict",
-            Some("Use GET /rounds to check status, or wait for the lock to expire"),
-        );
-    }
 
     let now = now_iso8601();
     let running_round = Round {
@@ -394,7 +395,10 @@ pub async fn handle(
             );
             let headers = Headers::new();
             headers.set("x-api-key", &api_key)?;
-            headers.set("anthropic-version", crate::providers::anthropic::API_VERSION)?;
+            headers.set(
+                "anthropic-version",
+                crate::providers::anthropic::API_VERSION,
+            )?;
             headers.set("Content-Type", "application/json")?;
             (crate::providers::anthropic::API_URL, body, headers)
         }

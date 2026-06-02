@@ -66,9 +66,7 @@ pub fn parse_event(
         "content_block_start" => {
             let parsed: serde_json::Value = serde_json::from_str(&event.data)
                 .map_err(|e| ProviderError::ParseError(format!("Invalid JSON: {e}")))?;
-            let block_type = parsed
-                .get("content_block")
-                .and_then(|b| b["type"].as_str());
+            let block_type = parsed.get("content_block").and_then(|b| b["type"].as_str());
             state.current_block = Some(match block_type {
                 Some("text") => BlockType::Text,
                 Some("thinking") => BlockType::Thinking,

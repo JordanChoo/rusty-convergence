@@ -100,12 +100,7 @@ pub async fn handle_get(
     }
 }
 
-pub async fn handle_list(
-    kv: KvStore,
-    env: &Env,
-    workflow: &str,
-    url: &Url,
-) -> Result<Response> {
+pub async fn handle_list(kv: KvStore, env: &Env, workflow: &str, url: &Url) -> Result<Response> {
     if kv_get::<Workflow>(&kv, &config_key(workflow))
         .await?
         .is_none()
@@ -118,7 +113,8 @@ pub async fn handle_list(
         );
     }
 
-    let params: std::collections::HashMap<String, String> = url.query_pairs().into_owned().collect();
+    let params: std::collections::HashMap<String, String> =
+        url.query_pairs().into_owned().collect();
     let status_filter = params.get("status");
     let limit: u64 = params
         .get("limit")

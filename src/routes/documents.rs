@@ -38,9 +38,7 @@ pub async fn handle_upload(
     if byte_len > max_bytes {
         return json_error(
             400,
-            &format!(
-                "Document exceeds maximum size ({byte_len} bytes > {max_bytes} bytes)"
-            ),
+            &format!("Document exceeds maximum size ({byte_len} bytes > {max_bytes} bytes)"),
             "bad_request",
             None,
         );

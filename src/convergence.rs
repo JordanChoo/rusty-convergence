@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use worker::kv::KvStore;
 
 use crate::error::now_iso8601;
-use crate::storage::{kv_get, kv_put, stats_key, meta_key};
+use crate::storage::{kv_get, kv_put, meta_key, stats_key};
 use crate::types::{ConvergenceData, Meta, Stats, StatsRoundEntry};
 
 pub fn compute_output_trend(word_counts: &[u32]) -> f64 {
@@ -263,7 +263,10 @@ mod tests {
         let counts = vec![4201, 3856, 3102, 2756];
         let trend = compute_output_trend(&counts);
         let expected = 1.0 - (2756.0 / 4201.0);
-        assert!((trend - expected).abs() < 0.001, "trend={trend}, expected={expected}");
+        assert!(
+            (trend - expected).abs() < 0.001,
+            "trend={trend}, expected={expected}"
+        );
     }
 
     #[test]
@@ -429,5 +432,288 @@ mod tests {
             c.recommendation.as_deref() == Some("continue")
                 || c.recommendation.as_deref() == Some("almost")
         );
+    }
+
+    // --- Convergence accuracy integration tests (PRD criterion 7) ---
+
+    fn make_round_content(base_words: &[&str], extra: &[&str]) -> String {
+        let mut words: Vec<&str> = base_words.to_vec();
+        words.extend_from_slice(extra);
+        words.join(" ")
+    }
+
+    #[test]
+    fn test_five_round_incremental_convergence_accuracy() {
+        // Simulate 5 rounds with known content, compute convergence incrementally,
+        // and verify against hand-calculated values.
+        let base = vec![
+            "architecture",
+            "security",
+            "protocol",
+            "api",
+            "design",
+            "implementation",
+            "rust",
+            "cloudflare",
+            "worker",
+            "streaming",
+        ];
+
+        let round1_content = make_round_content(
+            &base,
+            &[
+                "major",
+                "rewrite",
+                "fundamental",
+                "overhaul",
+                "restructure",
+                "vulnerability",
+                "critical",
+                "flaw",
+                "redesign",
+                "breaking",
+            ],
+        );
+        let round2_content = make_round_content(
+            &base,
+            &[
+                "refinement",
+                "improvement",
+                "adjustment",
+                "overhaul",
+                "restructure",
+                "optimization",
+                "enhancement",
+                "interface",
+                "redesign",
+                "update",
+            ],
+        );
+        let round3_content = make_round_content(
+            &base,
+            &[
+                "refinement",
+                "improvement",
+                "adjustment",
+                "polish",
+                "tweak",
+                "optimization",
+                "enhancement",
+                "interface",
+                "cleanup",
+                "update",
+            ],
+        );
+        let round4_content = make_round_content(
+            &base,
+            &[
+                "refinement",
+                "improvement",
+                "adjustment",
+                "polish",
+                "tweak",
+                "optimization",
+                "enhancement",
+                "interface",
+                "cleanup",
+                "minor",
+            ],
+        );
+        let round5_content = make_round_content(
+            &base,
+            &[
+                "refinement",
+                "improvement",
+                "adjustment",
+                "polish",
+                "tweak",
+                "optimization",
+                "enhancement",
+                "interface",
+                "cleanup",
+                "minor",
+            ],
+        );
+
+        let rounds = [
+            &round1_content,
+            &round2_content,
+            &round3_content,
+            &round4_content,
+            &round5_content,
+        ];
+
+        let mut prev_word_set: Option<HashSet<String>> = None;
+        let mut word_counts: Vec<u32> = Vec::new();
+        let mut scores: Vec<Option<f64>> = Vec::new();
+
+        for (i, content) in rounds.iter().enumerate() {
+            let wc = content.split_whitespace().count() as u32;
+            word_counts.push(wc);
+
+            let current_set = tokenize_to_word_set(content);
+
+            let similarity = prev_word_set
+                .as_ref()
+                .map(|prev| compute_similarity(prev, &current_set));
+
+            if word_counts.len() < 2 {
+                scores.push(None);
+            } else {
+                let ot = compute_output_trend(&word_counts);
+                let cv = compute_change_velocity(&word_counts);
+                let st = similarity.unwrap_or(0.0);
+                let c = compute_convergence(ot, cv, st);
+                scores.push(c.score);
+
+                // Verify each signal is in [0, 1]
+                assert!(ot >= 0.0 && ot <= 1.0, "Round {}: output_trend={ot}", i + 1);
+                assert!(
+                    cv >= 0.0 && cv <= 1.0,
+                    "Round {}: change_velocity={cv}",
+                    i + 1
+                );
+                assert!(st >= 0.0 && st <= 1.0, "Round {}: similarity={st}", i + 1);
+            }
+
+            prev_word_set = Some(current_set);
+        }
+
+        // Round 1: no score (null convergence)
+        assert!(scores[0].is_none());
+
+        // Scores should be monotonically non-decreasing (convergence improves)
+        for i in 2..scores.len() {
+            let prev = scores[i - 1].unwrap();
+            let curr = scores[i].unwrap();
+            assert!(
+                curr >= prev - 0.01,
+                "Score decreased at round {}: {prev} -> {curr}",
+                i + 1
+            );
+        }
+
+        // Final score should be high since rounds 4 and 5 are identical
+        let final_score = scores[4].unwrap();
+        assert!(
+            final_score >= 0.5,
+            "Final convergence score {final_score} should be >= 0.5"
+        );
+    }
+
+    #[test]
+    fn test_convergence_identical_rounds_converge_to_high() {
+        let content = "the architecture uses streaming with cloudflare workers";
+        let wc = content.split_whitespace().count() as u32;
+        let word_set = tokenize_to_word_set(content);
+
+        // All rounds identical → should converge strongly
+        let word_counts = vec![wc; 5];
+        let ot = compute_output_trend(&word_counts);
+        let cv = compute_change_velocity(&word_counts);
+        let sim = compute_similarity(&word_set, &word_set);
+
+        assert_eq!(ot, 0.0); // no decrease when all same
+        assert_eq!(cv, 1.0); // zero delta
+        assert_eq!(sim, 1.0); // identical sets
+
+        let c = compute_convergence(ot, cv, sim);
+        // 0.35*0 + 0.35*1 + 0.30*1 = 0.65
+        let expected = 0.35 * 0.0 + 0.35 * 1.0 + 0.30 * 1.0;
+        assert!(
+            (c.score.unwrap() - expected).abs() < 0.001,
+            "score={}, expected={expected}",
+            c.score.unwrap()
+        );
+        assert_eq!(c.recommendation.as_deref(), Some("continue"));
+    }
+
+    #[test]
+    fn test_convergence_strongly_decreasing_high_similarity() {
+        // Simulate shrinking output with high overlap → strong convergence
+        let word_counts = vec![5000u32, 4000, 3200, 2700, 2400];
+        let ot = compute_output_trend(&word_counts);
+        let cv = compute_change_velocity(&word_counts);
+
+        // output_trend: 1 - 2400/5000 = 0.52
+        let expected_ot = 1.0 - (2400.0 / 5000.0);
+        assert!((ot - expected_ot).abs() < 0.001);
+
+        // deltas: [1000, 800, 500, 300], max=1000, latest=300
+        // velocity: 1 - 300/1000 = 0.7
+        let expected_cv = 1.0 - (300.0 / 1000.0);
+        assert!((cv - expected_cv).abs() < 0.001);
+
+        let sim = 0.85;
+        let c = compute_convergence(ot, cv, sim);
+        let expected_score = 0.35 * expected_ot + 0.35 * expected_cv + 0.30 * sim;
+        assert!(
+            (c.score.unwrap() - expected_score).abs() < 0.01,
+            "score={}, expected={expected_score}",
+            c.score.unwrap()
+        );
+    }
+
+    #[test]
+    fn test_convergence_weight_formula_exact() {
+        // PRD section 9.1: score = 0.35*ot + 0.35*cv + 0.30*sim
+        for (ot, cv, sim) in [
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (0.5, 0.5, 0.5),
+            (0.3, 0.7, 0.9),
+        ] {
+            let c = compute_convergence(ot, cv, sim);
+            let expected = 0.35 * ot + 0.35 * cv + 0.30 * sim;
+            assert!(
+                (c.score.unwrap() - expected).abs() < 0.0001,
+                "ot={ot}, cv={cv}, sim={sim}: score={}, expected={expected}",
+                c.score.unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn test_convergence_recommendation_boundaries() {
+        // Test exact boundaries from PRD section 9.5
+        let c90 = compute_convergence(0.9, 0.9, 0.9);
+        assert_eq!(c90.recommendation.as_deref(), Some("stop"));
+
+        // Just below 0.90 → "almost"
+        let c89 = compute_convergence(0.88, 0.88, 0.88);
+        assert!(c89.score.unwrap() < 0.90);
+        assert_eq!(c89.recommendation.as_deref(), Some("almost"));
+
+        // 0.35*0.75 + 0.35*0.75 + 0.30*0.75 = 0.74999... (float rounding)
+        // Falls just below 0.75 → "continue"
+        let c75 = compute_convergence(0.75, 0.75, 0.75);
+        assert_eq!(c75.recommendation.as_deref(), Some("continue"));
+
+        // Slightly above threshold → "almost"
+        let c76 = compute_convergence(0.76, 0.76, 0.76);
+        assert_eq!(c76.recommendation.as_deref(), Some("almost"));
+
+        // Just below 0.50 → "early"
+        let c49 = compute_convergence(0.49, 0.49, 0.49);
+        assert!(c49.score.unwrap() < 0.50);
+        assert_eq!(c49.recommendation.as_deref(), Some("early"));
+    }
+
+    #[test]
+    fn test_division_by_zero_edge_cases() {
+        // All zeros
+        assert_eq!(compute_output_trend(&[0, 0, 0]), 0.0);
+        assert_eq!(compute_change_velocity(&[0, 0, 0]), 1.0);
+
+        // Single zero
+        assert_eq!(compute_output_trend(&[0]), 0.0);
+
+        // Empty sets
+        let empty: HashSet<String> = HashSet::new();
+        let nonempty: HashSet<String> = ["a"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(compute_similarity(&empty, &nonempty), 0.0);
+        assert_eq!(compute_similarity(&empty, &empty), 1.0);
     }
 }
