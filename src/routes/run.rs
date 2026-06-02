@@ -83,6 +83,7 @@ pub struct RoundCompletionSummary {
     pub duration_seconds: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn on_round_complete(
     kv: &KvStore,
     workflow: &str,
@@ -139,6 +140,7 @@ pub async fn on_round_complete(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn on_round_failed(
     kv: &KvStore,
     workflow: &str,
@@ -289,23 +291,25 @@ pub async fn handle(
         "openai" => "OPENAI_API_KEY",
         "anthropic" => "ANTHROPIC_API_KEY",
         _ => {
+            let _ = release_lock(&kv, workflow).await;
             return json_error(
                 400,
                 &format!("Unknown provider '{provider}'. Must be 'openai' or 'anthropic'"),
                 "bad_request",
                 None,
-            )
+            );
         }
     };
     let api_key = match env.secret(api_key_name) {
         Ok(s) => s.to_string(),
         Err(_) => {
+            let _ = release_lock(&kv, workflow).await;
             return json_error(
                 500,
                 &format!("Missing secret: {api_key_name}"),
                 "missing_config",
                 None,
-            )
+            );
         }
     };
 
@@ -316,12 +320,15 @@ pub async fn handle(
         wf.documents.clone()
     };
 
-    let (rendered_prompt, template_warnings) =
-        match render_template(template, workflow, &documents, &kv).await {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = release_lock(&kv, workflow).await;
-                return match e {
+    let (rendered_prompt, template_warnings) = match render_template(
+        template, workflow, &documents, &kv,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = release_lock(&kv, workflow).await;
+            return match e {
                     RenderError::MissingRole(role) => json_error(
                         422,
                         &format!(
@@ -344,8 +351,8 @@ pub async fn handle(
                         json_error(500, &format!("KV error: {e}"), "internal_error", None)
                     }
                 };
-            }
-        };
+        }
+    };
 
     let now = now_iso8601();
     let running_round = Round {
@@ -366,54 +373,85 @@ pub async fn handle(
         duration_seconds: None,
         error: None,
     };
-    kv_put(&kv, &round_key(workflow, round), &running_round).await?;
+    if let Err(e) = kv_put(&kv, &round_key(workflow, round), &running_round).await {
+        let _ = release_lock(&kv, workflow).await;
+        return Err(e);
+    }
 
     let provider_params = overrides
         .provider_params
         .as_ref()
         .or(wf.provider_params.as_ref());
 
-    let (api_url, request_body, auth_headers) = match provider.as_str() {
-        "openai" => {
-            let body = crate::providers::openai::build_request_body(
+    let build_fetch_result: Result<(Response,)> = async {
+        let (api_url, request_body, auth_headers) = match provider.as_str() {
+            "openai" => {
+                let body = crate::providers::openai::build_request_body(
+                    &model,
+                    system_prompt.as_deref(),
+                    &rendered_prompt,
+                    provider_params,
+                );
+                let headers = Headers::new();
+                headers.set("Authorization", &format!("Bearer {api_key}"))?;
+                headers.set("Content-Type", "application/json")?;
+                (crate::providers::openai::API_URL, body, headers)
+            }
+            "anthropic" => {
+                let body = crate::providers::anthropic::build_request_body(
+                    &model,
+                    system_prompt.as_deref(),
+                    &rendered_prompt,
+                    provider_params,
+                );
+                let headers = Headers::new();
+                headers.set("x-api-key", &api_key)?;
+                headers.set(
+                    "anthropic-version",
+                    crate::providers::anthropic::API_VERSION,
+                )?;
+                headers.set("Content-Type", "application/json")?;
+                (crate::providers::anthropic::API_URL, body, headers)
+            }
+            _ => unreachable!(),
+        };
+
+        let mut fetch_init = RequestInit::new();
+        fetch_init.with_method(Method::Post);
+        fetch_init.with_headers(auth_headers);
+        fetch_init.with_body(Some(wasm_bindgen::JsValue::from_str(
+            &request_body.to_string(),
+        )));
+
+        let fetch_request = Request::new_with_init(api_url, &fetch_init)?;
+        let response = Fetch::Request(fetch_request).send().await?;
+        Ok((response,))
+    }
+    .await;
+
+    let mut llm_response = match build_fetch_result {
+        Ok((resp,)) => resp,
+        Err(e) => {
+            let _ = on_round_failed(
+                &kv,
+                workflow,
+                round,
+                &format!("Failed to send request to provider: {e}"),
+                None,
+                &provider,
                 &model,
-                system_prompt.as_deref(),
-                &rendered_prompt,
-                provider_params,
+                include_impl,
+                &now,
+            )
+            .await;
+            return json_error(
+                502,
+                &format!("Failed to send request to provider: {e}"),
+                "provider_error",
+                None,
             );
-            let headers = Headers::new();
-            headers.set("Authorization", &format!("Bearer {api_key}"))?;
-            headers.set("Content-Type", "application/json")?;
-            (crate::providers::openai::API_URL, body, headers)
         }
-        "anthropic" => {
-            let body = crate::providers::anthropic::build_request_body(
-                &model,
-                system_prompt.as_deref(),
-                &rendered_prompt,
-                provider_params,
-            );
-            let headers = Headers::new();
-            headers.set("x-api-key", &api_key)?;
-            headers.set(
-                "anthropic-version",
-                crate::providers::anthropic::API_VERSION,
-            )?;
-            headers.set("Content-Type", "application/json")?;
-            (crate::providers::anthropic::API_URL, body, headers)
-        }
-        _ => unreachable!(),
     };
-
-    let mut fetch_init = RequestInit::new();
-    fetch_init.with_method(Method::Post);
-    fetch_init.with_headers(auth_headers);
-    fetch_init.with_body(Some(wasm_bindgen::JsValue::from_str(
-        &request_body.to_string(),
-    )));
-
-    let fetch_request = Request::new_with_init(api_url, &fetch_init)?;
-    let mut llm_response = Fetch::Request(fetch_request).send().await?;
 
     let status_code = llm_response.status_code();
     if status_code != 200 {

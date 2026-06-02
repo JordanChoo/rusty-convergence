@@ -90,6 +90,7 @@ pub fn extract_placeholders(template: &str) -> Vec<String> {
     result
 }
 
+#[allow(clippy::manual_is_multiple_of)]
 pub fn select_template(
     workflow: &Workflow,
     round: u32,
@@ -99,7 +100,7 @@ pub fn select_template(
         Some(v) => v,
         None => workflow
             .impl_every_n
-            .map_or(false, |n| n > 0 && round % n == 0),
+            .is_some_and(|n| n > 0 && round % n == 0),
     };
 
     let template = if include_impl {

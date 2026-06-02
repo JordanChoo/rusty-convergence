@@ -27,6 +27,7 @@ pub fn lock_key(workflow: &str) -> String {
     format!("lock::{workflow}")
 }
 
+#[allow(dead_code)]
 pub fn parse_round_number_from_key(key: &str) -> Option<u32> {
     key.rsplit("::").next()?.parse().ok()
 }

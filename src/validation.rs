@@ -62,7 +62,7 @@ pub fn check_workflow_name(name: &str) -> std::result::Result<(), ValidationErro
     let valid = name
         .chars()
         .next()
-        .map_or(false, |c| c.is_ascii_alphanumeric())
+        .is_some_and(|c| c.is_ascii_alphanumeric())
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
@@ -89,7 +89,7 @@ pub fn check_role_name(role: &str) -> std::result::Result<(), ValidationError> {
     let valid = role
         .chars()
         .next()
-        .map_or(false, |c| c.is_ascii_alphanumeric())
+        .is_some_and(|c| c.is_ascii_alphanumeric())
         && role
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
@@ -212,5 +212,100 @@ mod tests {
 
         let err = check_round_number(0).unwrap_err();
         assert_eq!(err.code, "bad_request");
+    }
+
+    // --- Error path edge case tests ---
+
+    #[test]
+    fn test_workflow_name_special_chars_rejected() {
+        assert!(check_workflow_name("foo.bar").is_err());
+        assert!(check_workflow_name("foo/bar").is_err());
+        assert!(check_workflow_name("foo::bar").is_err());
+        assert!(check_workflow_name("foo@bar").is_err());
+        assert!(check_workflow_name("foo bar").is_err());
+        assert!(check_workflow_name("foo\nbar").is_err());
+        assert!(check_workflow_name("foo\tbar").is_err());
+    }
+
+    #[test]
+    fn test_workflow_name_boundary_lengths() {
+        assert!(check_workflow_name("a").is_ok());
+        assert!(check_workflow_name(&"x".repeat(64)).is_ok());
+        assert!(check_workflow_name(&"x".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn test_role_name_special_chars_rejected() {
+        assert!(check_role_name("foo.bar").is_err());
+        assert!(check_role_name("foo/bar").is_err());
+        assert!(check_role_name("foo::bar").is_err());
+        assert!(check_role_name("foo bar").is_err());
+    }
+
+    #[test]
+    fn test_role_name_boundary_lengths() {
+        assert!(check_role_name("a").is_ok());
+        assert!(check_role_name(&"r".repeat(32)).is_ok());
+        assert!(check_role_name(&"r".repeat(33)).is_err());
+    }
+
+    #[test]
+    fn test_round_number_boundaries() {
+        assert!(check_round_number(0).is_err());
+        assert!(check_round_number(1).is_ok());
+        assert!(check_round_number(999).is_ok());
+        assert!(check_round_number(1000).is_err());
+        assert!(check_round_number(u32::MAX).is_err());
+    }
+
+    #[test]
+    fn test_round_string_parsing_valid() {
+        // Test the parsing + validation logic via check_round_number
+        assert!(check_round_number("1".parse::<u32>().unwrap()).is_ok());
+        assert!(check_round_number("999".parse::<u32>().unwrap()).is_ok());
+        assert!(check_round_number("42".parse::<u32>().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn test_round_string_parsing_invalid_format() {
+        assert!("abc".parse::<u32>().is_err());
+        assert!("".parse::<u32>().is_err());
+        assert!("-1".parse::<u32>().is_err());
+        assert!("1.5".parse::<u32>().is_err());
+    }
+
+    #[test]
+    fn test_round_string_parsing_out_of_range() {
+        assert!(check_round_number(0).is_err());
+        assert!(check_round_number(1000).is_err());
+        assert!(check_round_number(99999).is_err());
+    }
+
+    #[test]
+    fn test_constant_time_eq_single_char_diff() {
+        assert!(!constant_time_eq(b"a", b"b"));
+        assert!(constant_time_eq(b"a", b"a"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_unicode() {
+        assert!(constant_time_eq("héllo".as_bytes(), "héllo".as_bytes()));
+        assert!(!constant_time_eq("héllo".as_bytes(), "hello".as_bytes()));
+    }
+
+    #[test]
+    fn test_workflow_name_must_start_alphanumeric() {
+        assert!(check_workflow_name("_leading").is_err());
+        assert!(check_workflow_name("-leading").is_err());
+        assert!(check_workflow_name("0leading").is_ok());
+        assert!(check_workflow_name("Aleading").is_ok());
+    }
+
+    #[test]
+    fn test_role_name_must_start_alphanumeric() {
+        assert!(check_role_name("_leading").is_err());
+        assert!(check_role_name("-leading").is_err());
+        assert!(check_role_name("0leading").is_ok());
+        assert!(check_role_name("aleading").is_ok());
     }
 }

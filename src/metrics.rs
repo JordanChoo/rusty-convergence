@@ -109,4 +109,35 @@ mod tests {
         let m = compute_metrics("é");
         assert_eq!(m.characters, 2);
     }
+
+    #[test]
+    fn test_heading_in_code_block_still_counts() {
+        // PRD says count lines matching regex ^#{1,6}\s — no code block awareness
+        let content = "```\n# heading inside code\n```";
+        let m = compute_metrics(content);
+        assert_eq!(m.headings, 1);
+    }
+
+    #[test]
+    fn test_indented_heading() {
+        let m = compute_metrics("  # indented heading");
+        assert_eq!(m.headings, 1);
+    }
+
+    #[test]
+    fn test_only_whitespace_content() {
+        let m = compute_metrics("   \n  \n\t");
+        assert_eq!(m.words, 0);
+        assert_eq!(m.lines, 3);
+    }
+
+    #[test]
+    fn test_large_content_metrics() {
+        let word = "specification ";
+        let content = word.repeat(1000);
+        let m = compute_metrics(&content);
+        assert_eq!(m.words, 1000);
+        assert_eq!(m.lines, 1);
+        assert_eq!(m.headings, 0);
+    }
 }

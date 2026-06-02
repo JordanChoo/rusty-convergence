@@ -11,6 +11,7 @@ pub enum StreamChunk {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum ProviderError {
     HttpError { status: u16, body: String },
     StreamDisconnect { bytes_received: usize },
@@ -77,6 +78,7 @@ pub fn parse_sse_events(raw: &str) -> Vec<SseEvent> {
     events
 }
 
+#[allow(dead_code)]
 pub fn error_code_for_provider_error(err: &ProviderError) -> (&'static str, u16) {
     match err {
         ProviderError::HttpError { .. } => ("provider_error", 502),
