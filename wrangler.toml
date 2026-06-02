@@ -1,6 +1,7 @@
 name = "rusty-convergence"
-main = "build/worker/shim.mjs"
+main = "worker.mjs"
 compatibility_date = "2026-06-01"
+workers_dev = true
 
 [build]
 command = "curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable && . \"$HOME/.cargo/env\" && rustup target add wasm32-unknown-unknown && cargo install -q worker-build && worker-build --release"
@@ -12,7 +13,7 @@ MAX_DOCUMENT_BYTES = "1048576"
 
 [[kv_namespaces]]
 binding = "APRP"
-id = "<namespace-id>"
+id = "6ac17ea140904819a28cedf4108c8f64"
 
 # Secrets (set via `wrangler secret put`):
 # CSVKEY
