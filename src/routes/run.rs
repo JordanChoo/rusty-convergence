@@ -217,23 +217,27 @@ pub async fn handle(
         }
     };
 
+    let default_overrides = RunOverrides {
+        include_impl: None,
+        skip_sequence_check: None,
+        provider: None,
+        model: None,
+        system_prompt: None,
+        provider_params: None,
+    };
     let overrides: RunOverrides = match req.text().await {
-        Ok(body) if !body.is_empty() => serde_json::from_str(&body).unwrap_or(RunOverrides {
-            include_impl: None,
-            skip_sequence_check: None,
-            provider: None,
-            model: None,
-            system_prompt: None,
-            provider_params: None,
-        }),
-        _ => RunOverrides {
-            include_impl: None,
-            skip_sequence_check: None,
-            provider: None,
-            model: None,
-            system_prompt: None,
-            provider_params: None,
+        Ok(body) if !body.is_empty() => match serde_json::from_str(&body) {
+            Ok(o) => o,
+            Err(e) => {
+                return json_error(
+                    400,
+                    &format!("Invalid JSON in request body: {e}"),
+                    "bad_request",
+                    Some("Send a valid JSON object with optional fields: include_impl, skip_sequence_check, provider, model, system_prompt, provider_params"),
+                );
+            }
         },
+        _ => default_overrides,
     };
 
     let skip_seq = overrides.skip_sequence_check.unwrap_or(false);

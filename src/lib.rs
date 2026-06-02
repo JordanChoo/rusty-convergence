@@ -114,7 +114,7 @@ async fn handle_request(req: Request, env: Env) -> Result<Response> {
                 return json_error(405, "Method not allowed", "method_not_allowed", None);
             }
             let kv = require_auth!(&url, &env);
-            routes::rounds::handle_get(kv, &env, workflow, round_str).await
+            routes::rounds::handle_get(kv, &env, workflow, round_str, &req).await
         }
 
         ["rounds", workflow] => {

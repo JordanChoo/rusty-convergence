@@ -13,6 +13,7 @@ pub async fn handle_get(
     env: &Env,
     workflow: &str,
     round_str: &str,
+    req: &Request,
 ) -> Result<Response> {
     let round = match parse_and_validate_round(round_str) {
         Ok(n) => n,
@@ -36,6 +37,13 @@ pub async fn handle_get(
 
     let lock_ttl = default_lock_ttl(env);
     let status = effective_status(&record, lock_ttl);
+
+    let wants_markdown = req
+        .headers()
+        .get("Accept")
+        .ok()
+        .flatten()
+        .is_some_and(|v| v.contains("text/markdown"));
 
     match status {
         RoundStatus::Running => success_response(
@@ -64,6 +72,12 @@ pub async fn handle_get(
                 vec![],
                 None,
             )
+        }
+        RoundStatus::Complete if wants_markdown => {
+            let content = record.content.unwrap_or_default();
+            let headers = Headers::new();
+            headers.set("Content-Type", "text/markdown")?;
+            Ok(Response::ok(content)?.with_headers(headers))
         }
         RoundStatus::Complete => success_response(
             json!({
@@ -145,20 +159,26 @@ pub async fn handle_list(kv: KvStore, env: &Env, workflow: &str, url: &Url) -> R
             }
 
             let convergence_score = record.convergence.as_ref().and_then(|c| c.score);
-            rounds.push(json!({
-                "round": record.round,
-                "status": status,
-                "words": record.metrics.as_ref().map(|m| m.words),
-                "convergence_score": convergence_score,
-                "completed_at": record.completed_at,
-            }));
+            rounds.push((
+                record.round,
+                json!({
+                    "round": record.round,
+                    "status": status,
+                    "words": record.metrics.as_ref().map(|m| m.words),
+                    "convergence_score": convergence_score,
+                    "completed_at": record.completed_at,
+                }),
+            ));
         }
     }
+
+    rounds.sort_by_key(|(round_num, _)| *round_num);
+    let sorted_rounds: Vec<serde_json::Value> = rounds.into_iter().map(|(_, v)| v).collect();
 
     success_response(
         json!({
             "workflow": workflow,
-            "rounds": rounds,
+            "rounds": sorted_rounds,
             "cursor": next_cursor,
         }),
         vec![],
