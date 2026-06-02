@@ -71,8 +71,12 @@ pub async fn handle_create(kv: KvStore, mut req: Request) -> Result<Response> {
 
     let template = body["template"].as_str().map(String::from);
     let template_with_impl = body["template_with_impl"].as_str().map(String::from);
+    let impl_every_n = body["impl_every_n"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok());
 
-    let has_impl_template = template_with_impl.is_some();
+    let validate_impl_template =
+        implementation_template_is_active(template_with_impl.as_deref(), impl_every_n);
     let effective_template = template.as_deref().unwrap_or(DEFAULT_TEMPLATE);
     let effective_impl_template = template_with_impl
         .as_deref()
@@ -93,8 +97,10 @@ pub async fn handle_create(kv: KvStore, mut req: Request) -> Result<Response> {
             );
         }
         None => {
-            let has_impl_placeholder =
-                extract_placeholders(effective_impl_template).contains(&"implementation".into());
+            let has_impl_placeholder = validate_impl_template
+                && extract_placeholders(effective_impl_template)
+                    .iter()
+                    .any(|p| p == "implementation");
             default_documents_map(has_impl_placeholder)
         }
     };
@@ -138,7 +144,7 @@ pub async fn handle_create(kv: KvStore, mut req: Request) -> Result<Response> {
         }
     }
 
-    if has_impl_template || template.is_none() {
+    if validate_impl_template {
         let impl_placeholders = extract_placeholders(effective_impl_template);
         for placeholder in &impl_placeholders {
             if !documents.contains_key(placeholder.as_str()) {
@@ -180,7 +186,7 @@ pub async fn handle_create(kv: KvStore, mut req: Request) -> Result<Response> {
     }
 
     let mut all_referenced: Vec<String> = template_placeholders;
-    if has_impl_template || template.is_none() {
+    if validate_impl_template {
         let impl_placeholders = extract_placeholders(effective_impl_template);
         for p in impl_placeholders {
             if !all_referenced.contains(&p) {
@@ -209,15 +215,48 @@ pub async fn handle_create(kv: KvStore, mut req: Request) -> Result<Response> {
         documents,
         template,
         template_with_impl,
-        impl_every_n: body["impl_every_n"]
-            .as_u64()
-            .and_then(|n| u32::try_from(n).ok()),
+        impl_every_n,
     };
 
     let key = config_key(name);
     kv_put(&kv, &key, &workflow).await?;
 
     success_response(json!(workflow), warnings, None)
+}
+
+fn implementation_template_is_active(
+    template_with_impl: Option<&str>,
+    impl_every_n: Option<u32>,
+) -> bool {
+    template_with_impl.is_some() || impl_every_n.is_some_and(|n| n > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::implementation_template_is_active;
+
+    #[test]
+    fn implementation_template_inactive_for_normal_workflow() {
+        assert!(!implementation_template_is_active(None, None));
+    }
+
+    #[test]
+    fn implementation_template_inactive_for_zero_interval() {
+        assert!(!implementation_template_is_active(None, Some(0)));
+    }
+
+    #[test]
+    fn implementation_template_active_when_explicit_template_present() {
+        assert!(implementation_template_is_active(
+            Some("{{implementation}}"),
+            None
+        ));
+    }
+
+    #[test]
+    fn implementation_template_active_when_interval_enabled() {
+        assert!(implementation_template_is_active(None, Some(4)));
+    }
 }
 
 pub async fn handle_list(kv: KvStore, url: &Url) -> Result<Response> {
