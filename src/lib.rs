@@ -75,7 +75,7 @@ async fn handle_request(req: Request, env: Env) -> Result<Response> {
             let kv = require_auth!(&url, &env);
             match method {
                 Method::Put => {
-                    routes::documents::handle_upload(kv, workflow, role, req).await
+                    routes::documents::handle_upload(kv, &env, workflow, role, req).await
                 }
                 Method::Get => routes::documents::handle_get(kv, workflow, role).await,
                 _ => json_error(405, "Method not allowed", "method_not_allowed", None),

@@ -120,6 +120,20 @@ pub fn validate_round_number(round: u32) -> std::result::Result<(), Response> {
     check_round_number(round).map_err(|e| e.into_response())
 }
 
+pub fn parse_and_validate_round(round_str: &str) -> std::result::Result<u32, Response> {
+    let round: u32 = round_str.parse().map_err(|_| {
+        json_error(
+            400,
+            &format!("Invalid round number: '{round_str}'. Must be a positive integer."),
+            "bad_request",
+            None,
+        )
+        .unwrap()
+    })?;
+    check_round_number(round).map_err(|e| e.into_response())?;
+    Ok(round)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

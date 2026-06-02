@@ -61,7 +61,7 @@ pub fn parse_sse_events(raw: &str) -> Vec<SseEvent> {
                 event_type = Some(rest.trim().to_string());
             } else if let Some(rest) = line.strip_prefix("data:") {
                 data_lines.push(rest.trim_start_matches(' '));
-            } else if line.starts_with("data") && !line.contains(':') {
+            } else if line == "data" {
                 data_lines.push("");
             }
         }
@@ -79,13 +79,7 @@ pub fn parse_sse_events(raw: &str) -> Vec<SseEvent> {
 
 pub fn error_code_for_provider_error(err: &ProviderError) -> (&'static str, u16) {
     match err {
-        ProviderError::HttpError { status, .. } => {
-            if *status == 429 || *status >= 500 {
-                ("provider_error", 502)
-            } else {
-                ("provider_error", 502)
-            }
-        }
+        ProviderError::HttpError { .. } => ("provider_error", 502),
         ProviderError::Timeout => ("provider_timeout", 504),
         ProviderError::StreamDisconnect { .. } => ("provider_error", 502),
         ProviderError::EmptyResponse => ("provider_error", 502),

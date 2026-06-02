@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 
+use worker::kv::KvStore;
+
+use crate::storage::{doc_key, kv_get_text};
 use crate::types::Workflow;
 
 pub const DEFAULT_TEMPLATE: &str = r#"First, read this README:
@@ -141,6 +144,47 @@ pub fn detect_unreferenced_roles(
             )
         })
         .collect()
+}
+
+#[derive(Debug)]
+pub enum RenderError {
+    MissingRole(String),
+    MissingDocument(String, String),
+    KvError(String),
+}
+
+pub async fn render_template(
+    template: &str,
+    workflow: &str,
+    documents: &HashMap<String, String>,
+    kv: &KvStore,
+) -> std::result::Result<(String, Vec<String>), RenderError> {
+    let placeholders = extract_placeholders(template);
+
+    let mut contents: HashMap<String, String> = HashMap::new();
+    for placeholder in &placeholders {
+        let role = documents
+            .get(placeholder.as_str())
+            .ok_or_else(|| RenderError::MissingRole(placeholder.clone()))?;
+
+        let key = doc_key(workflow, role);
+        let text = kv_get_text(kv, &key)
+            .await
+            .map_err(|e| RenderError::KvError(e.to_string()))?
+            .ok_or_else(|| RenderError::MissingDocument(placeholder.clone(), role.clone()))?;
+
+        contents.insert(placeholder.clone(), text);
+    }
+
+    let mut rendered = template.to_string();
+    for (placeholder, content) in &contents {
+        let token = format!("{{{{{placeholder}}}}}");
+        rendered = rendered.replace(&token, content);
+    }
+
+    let warnings = detect_unreferenced_roles(documents, &placeholders);
+
+    Ok((rendered, warnings))
 }
 
 #[cfg(test)]
