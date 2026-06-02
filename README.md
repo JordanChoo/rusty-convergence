@@ -1,9 +1,9 @@
 # Rusty Convergence
 
-Rusty Convergence is an API-first implementation of Automated Plan Reviser
-Pro (APRP): a Rust Cloudflare Worker that runs iterative specification review
-rounds against direct LLM APIs, stores the results in Cloudflare KV, and
-computes convergence signals so callers know when a plan is becoming stable.
+Rusty Convergence is the API-first implementation of Automated Plan Reviser
+Pro (APRP). It is a Rust Cloudflare Worker that runs iterative specification
+review rounds against direct LLM APIs, stores results in Cloudflare KV, and
+computes convergence signals so callers can see when a plan is becoming stable.
 
 The system is designed for coding agents, CI jobs, scripts, and other
 automation. It does not drive a browser, depend on a ChatGPT web session, or
@@ -21,11 +21,11 @@ usually improve through repeated review:
 - middle rounds refine interfaces, invariants, and failure modes
 - later rounds produce smaller edits as the design settles
 
-Rusty Convergence automates that loop. It turns "ask an LLM to review this
-plan again" into a durable API workflow with history, retry semantics,
-document bundling, provider abstraction, and convergence analytics.
+Rusty Convergence automates that loop. Instead of a one-off prompt pasted into
+a chat window, each review becomes a durable API workflow with history, retry
+semantics, document bundling, provider abstraction, and convergence analytics.
 
-This is useful when you want:
+Use it for:
 
 - programmatic review rounds from a CLI, CI job, or agent orchestrator
 - direct OpenAI and Anthropic API execution rather than browser automation
@@ -71,8 +71,8 @@ Stats are stored under `stats::<workflow>`.
 ### Integration Prompt
 
 The integration endpoint wraps a completed round in instructions suitable for a
-coding agent. This keeps the Worker focused on review generation while leaving
-source editing to the caller.
+coding agent. The Worker stays focused on review generation; callers handle
+source edits.
 
 ## Architecture
 
@@ -143,9 +143,8 @@ a machine running an interactive session.
 ### API-Only Execution
 
 Every operation is available over HTTP. The Worker does not commit code, edit
-documents, manage branches, or operate an interactive TUI. This keeps the
-service composable: callers can be shell scripts, coding agents, scheduled CI
-jobs, dashboards, or one-off curl commands.
+documents, manage branches, or operate an interactive TUI. Callers can be shell
+scripts, coding agents, scheduled CI jobs, dashboards, or one-off curl commands.
 
 ### Durable State, Stateless Compute
 
@@ -161,7 +160,7 @@ modules. The route layer deals with normalized chunks:
 - `Usage`
 - `Done`
 
-OpenAI and Anthropic can therefore share workflow logic, locking, persistence,
+OpenAI and Anthropic use the same workflow logic, locking, persistence,
 metrics, and convergence calculations.
 
 ### Conservative Overwrite Rules
@@ -170,12 +169,12 @@ Completed rounds cannot be overwritten. Failed or stale rounds can be retried.
 Sequential enforcement requires round N-1 to be complete before round N, unless
 the caller explicitly sets `skip_sequence_check: true`.
 
-### Cheap Convergence Signals
+### Lightweight Convergence Signals
 
 Convergence is intentionally simple enough to compute at the edge. It uses word
 counts and word-set similarity rather than expensive semantic embeddings. The
-goal is not a perfect mathematical proof of convergence; it is a useful signal
-for deciding whether more review rounds are worth the cost.
+score is a practical stop-or-continue signal for deciding whether another review
+round is worth the cost.
 
 ## Authentication
 
@@ -190,9 +189,8 @@ The expected value is stored as a Cloudflare Worker secret named `CSVKEY`.
 Comparison uses a constant-time XOR-and-fold check to avoid early-exit timing
 leaks.
 
-This is single-tenant internal-tool authentication. Because the key is in the
-URL, do not use this as a public multi-tenant API without changing the auth
-model.
+Treat this as single-tenant internal-tool authentication. Because the key is in
+the URL, public or multi-tenant deployments need a different auth model.
 
 ## Response Envelope
 
@@ -406,9 +404,9 @@ without changing the saved workflow:
 }
 ```
 
-This is useful for comparing OpenAI and Anthropic on the same documents, trying
-a higher reasoning budget for one round, or forcing implementation context into
-a specific review.
+Use overrides to compare OpenAI and Anthropic on the same documents, try a
+higher reasoning budget for one round, or force implementation context into a
+specific review.
 
 Provider params are passed through with protected fields blocked:
 
@@ -417,8 +415,8 @@ Provider params are passed through with protected fields blocked:
 | OpenAI | `model`, `stream`, `stream_options`, `messages` |
 | Anthropic | `model`, `stream`, `messages`, `system` |
 
-The route layer owns those fields so callers cannot override the selected model
-or replace the rendered document bundle accidentally.
+The route layer owns those fields, which prevents callers from replacing the
+selected model or rendered document bundle by accident.
 
 ## Prompt Templates
 
@@ -442,13 +440,12 @@ If `template` is omitted, the Worker uses a built-in review template that
 references `{{readme}}` and `{{spec}}`. If implementation review is enabled,
 the built-in implementation template also references `{{implementation}}`.
 
-The simplest workflows should pass an explicit `documents` map, as the examples
-above do. If `documents` is omitted, the Worker derives default role mappings
-from the built-in templates. Because the built-in implementation template is
-available for implementation rounds, that default map can include
-`"implementation": "impl"`; upload `/documents/<workflow>/impl` as well, or
-provide an explicit `documents` map when a workflow only needs README and spec
-documents.
+For the simplest workflows, pass an explicit `documents` map as shown above. If
+`documents` is omitted, the Worker derives default role mappings from the
+built-in templates. The built-in implementation template is available for
+implementation rounds, so the default map can include `"implementation":
+"impl"`. Upload `/documents/<workflow>/impl` as well, or provide an explicit
+`documents` map when a workflow only needs README and spec documents.
 
 Implementation context is selected when:
 
@@ -482,9 +479,8 @@ validation errors.
 17. Release the lock.
 18. Return the normalized JSON response.
 
-The provider APIs stream to the Worker, and the Worker parses those SSE
-responses internally. The public `POST /run` response is returned when the
-provider stream has completed and the round has been saved.
+Provider APIs stream to the Worker. The Worker parses those SSE responses
+internally, saves the round, and then returns the public `POST /run` response.
 
 ## Retry and Lock Semantics
 
@@ -499,8 +495,8 @@ Round behavior is deliberately conservative:
 | `failed` | retry allowed |
 | `stale` | retry allowed |
 
-KV does not provide compare-and-swap, so locks are best-effort. In the intended
-single-tenant use case, the lock prevents accidental duplicate runs and makes
+KV does not provide compare-and-swap, so locks are best-effort. In the
+single-tenant use case, the lock prevents accidental duplicate runs and keeps
 normal retry behavior predictable.
 
 ## Convergence Algorithm
@@ -544,8 +540,8 @@ Each completed round stores:
 | `characters` | UTF-8 byte length |
 | `headings` | Markdown headings matching `#` through `######` with a space |
 
-These metrics support convergence, quick round inspection, and basic output
-quality checks.
+These metrics feed convergence calculations and make round records easier to
+inspect.
 
 ## Storage Schema
 
@@ -648,7 +644,7 @@ ANTHROPIC_MODEL="<anthropic-model-id>" \
 ```
 
 The real-LLM test makes billable provider calls. It creates separate OpenAI and
-Anthropic workflows, runs real rounds, validates persisted round data, checks
+Anthropic workflows, runs live rounds, validates persisted round data, checks
 stats, and cleans up the workflows at exit.
 
 ## Security Model
@@ -676,7 +672,7 @@ stats, and cleans up the workflows at exit.
 
 ## What This Does Not Do
 
-Rusty Convergence intentionally avoids several responsibilities:
+Rusty Convergence leaves these responsibilities to callers or companion tools:
 
 - no browser automation
 - no local project filesystem access at runtime
@@ -687,8 +683,7 @@ Rusty Convergence intentionally avoids several responsibilities:
 - no automatic retry of expensive LLM calls
 - no server-side diff rendering
 
-Those concerns belong in callers or future companion tools. The Worker stays
-small, durable, and easy to operate.
+The Worker stays small, durable, and easy to operate.
 
 ## License
 
