@@ -97,8 +97,7 @@ pub async fn on_round_complete(
 ) -> Result<RoundCompletionSummary> {
     let metrics = compute_metrics(content);
 
-    let computed =
-        compute_stats_update(kv, workflow, round_num, content, metrics.words).await?;
+    let computed = compute_stats_update(kv, workflow, round_num, content, metrics.words).await?;
 
     let completed_at = now_iso8601();
     let duration = compute_duration(started_at, &completed_at);
@@ -127,10 +126,18 @@ pub async fn on_round_complete(
     kv_put(kv, &round_key(workflow, round_num), &complete_round).await?;
 
     // Stats and meta are recoverable via POST /stats/rebuild if these fail.
-    commit_stats(kv, workflow, &computed.updated_stats).await?;
-    update_meta_after_round(kv, workflow, round_num, computed.convergence.score).await?;
+    // Use let _ = so that a stats/meta write failure doesn't prevent the
+    // response from being sent — the round record is already saved.
+    if let Err(e) = commit_stats(kv, workflow, &computed.updated_stats).await {
+        console_log!("warn: commit_stats failed for {workflow} round {round_num}: {e}");
+    }
+    if let Err(e) =
+        update_meta_after_round(kv, workflow, round_num, computed.convergence.score).await
+    {
+        console_log!("warn: update_meta failed for {workflow} round {round_num}: {e}");
+    }
 
-    release_lock(kv, workflow).await?;
+    let _ = release_lock(kv, workflow).await;
 
     Ok(RoundCompletionSummary {
         words: metrics.words,

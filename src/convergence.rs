@@ -171,11 +171,7 @@ pub async fn compute_stats_update(
     })
 }
 
-pub async fn commit_stats(
-    kv: &KvStore,
-    workflow: &str,
-    stats: &Stats,
-) -> worker::Result<()> {
+pub async fn commit_stats(kv: &KvStore, workflow: &str, stats: &Stats) -> worker::Result<()> {
     write_stats(kv, workflow, stats).await
 }
 
