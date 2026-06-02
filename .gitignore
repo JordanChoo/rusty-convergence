@@ -30,3 +30,6 @@ gemini.mcp.json
 windsurf.mcp.json
 .claude/settings.local.json
 repo/
+
+# bv (beads viewer) local config and caches
+.bv/
