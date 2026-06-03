@@ -7,8 +7,8 @@ use crate::prompt::{
     default_documents_map, extract_placeholders, DEFAULT_TEMPLATE, DEFAULT_TEMPLATE_WITH_IMPL,
 };
 use crate::storage::{
-    config_key, doc_key, kv_delete, kv_get, kv_get_text, kv_list_by_prefix, kv_put, lock_key,
-    meta_key, stats_key,
+    autorun_key, config_key, doc_key, kv_delete, kv_get, kv_get_text, kv_list_by_prefix, kv_put,
+    lock_key, meta_key, stats_key,
 };
 use crate::types::{Meta, Workflow};
 use crate::validation::{check_role_name, validate_workflow_name};
@@ -367,7 +367,12 @@ pub async fn handle_delete(kv: KvStore, name: &str) -> Result<Response> {
         }
     }
 
-    for extra_key in &[meta_key(name), stats_key(name), lock_key(name)] {
+    for extra_key in &[
+        meta_key(name),
+        stats_key(name),
+        lock_key(name),
+        autorun_key(name),
+    ] {
         if kv_delete(&kv, extra_key).await.is_ok() {
             keys_removed += 1;
         }

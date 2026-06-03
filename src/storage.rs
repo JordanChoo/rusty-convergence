@@ -27,6 +27,10 @@ pub fn lock_key(workflow: &str) -> String {
     format!("lock::{workflow}")
 }
 
+pub fn autorun_key(workflow: &str) -> String {
+    format!("autorun::{workflow}")
+}
+
 #[allow(dead_code)]
 pub fn parse_round_number_from_key(key: &str) -> Option<u32> {
     key.rsplit("::").next()?.parse().ok()
@@ -193,6 +197,11 @@ mod tests {
     #[test]
     fn test_lock_key() {
         assert_eq!(lock_key("fcp-spec"), "lock::fcp-spec");
+    }
+
+    #[test]
+    fn test_autorun_key() {
+        assert_eq!(autorun_key("fcp-spec"), "autorun::fcp-spec");
     }
 
     #[test]

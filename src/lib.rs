@@ -60,6 +60,7 @@ async fn handle_request(req: Request, env: Env) -> Result<Response> {
         ["stats", _, "rebuild"] => "stats/:workflow/rebuild",
         ["stats", _] => "stats/:workflow",
         ["integrate", _, _] => "integrate/:workflow/:round",
+        ["auto", _, "resume"] => "auto/:workflow/resume",
         ["auto", _] => "auto/:workflow",
         _ => "not_found",
     };
@@ -144,6 +145,14 @@ async fn handle_request(req: Request, env: Env) -> Result<Response> {
             Method::Post => {
                 let kv = require_auth!(&url, &env);
                 routes::integrate::handle(kv, workflow, round_str).await
+            }
+            _ => json_error(405, "Method not allowed", "method_not_allowed", None),
+        },
+
+        ["auto", workflow, "resume"] => match method {
+            Method::Post => {
+                let kv = require_auth!(&url, &env);
+                routes::auto::handle_resume(kv, &env, workflow, req).await
             }
             _ => json_error(405, "Method not allowed", "method_not_allowed", None),
         },

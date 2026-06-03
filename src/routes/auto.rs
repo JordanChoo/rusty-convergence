@@ -6,18 +6,21 @@ use worker::wasm_bindgen_futures::spawn_local;
 use worker::*;
 
 use crate::error::{json_error, now_iso8601, success_response};
-use crate::routes::integrate::build_integration_prompt;
+use crate::routes::integrate::{
+    build_integration_prompt, integrate_documents_claude, DEFAULT_INTEGRATION_MODEL,
+};
 use crate::routes::run::{execute_round, RoundResult};
 use crate::storage::{
-    config_key, kv_get, kv_list_by_prefix, meta_key, parse_round_number_from_key,
+    autorun_key, config_key, kv_delete, kv_get, kv_list_by_prefix, kv_put, meta_key,
+    parse_round_number_from_key,
 };
-use crate::types::{Meta, Round, RoundStatus, RunOverrides, UsageStats, Workflow};
+use crate::types::{IntegrationMode, Meta, Round, RoundStatus, RunOverrides, UsageStats, Workflow};
 use crate::validation::validate_workflow_name;
 
 const DEFAULT_MAX_AUTO_ROUNDS: u32 = 20;
 const MAX_ROUND_NUMBER: u32 = 999;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderRotationEntry {
     pub provider: String,
     pub model: String,
@@ -38,10 +41,12 @@ pub struct AutoRunRequest {
     pub system_prompt: Option<String>,
     pub provider_params: Option<serde_json::Value>,
     pub provider_rotation: Option<Vec<ProviderRotationEntry>>,
+    pub integration_mode: Option<String>,
+    pub integration_model: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct RoundSummary {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoundSummary {
     round: u32,
     words: u32,
     score: Option<f64>,
@@ -142,6 +147,47 @@ fn append_unique_warnings(warnings: &mut Vec<String>, new_warnings: &[String]) {
             warnings.push(warning.clone());
         }
     }
+}
+
+fn parse_integration_mode(s: Option<&str>) -> std::result::Result<IntegrationMode, String> {
+    match s {
+        None | Some("none") => Ok(IntegrationMode::None),
+        Some("claude") => Ok(IntegrationMode::Claude),
+        Some("human") => Ok(IntegrationMode::Human),
+        Some(other) => Err(format!(
+            "Invalid integration_mode '{other}'. Must be 'none', 'claude', or 'human'"
+        )),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoRunState {
+    pub workflow: String,
+    pub integration_mode: IntegrationMode,
+    pub integration_model: String,
+    pub rounds_requested: u32,
+    pub effective_rounds: u32,
+    pub start_round: u32,
+    pub min_rounds: u32,
+    pub stop_on_convergence: bool,
+    pub convergence_threshold: f64,
+    pub max_duration_seconds: Option<u64>,
+    pub include_integration: bool,
+    pub include_impl: Option<bool>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub system_prompt: Option<String>,
+    pub provider_params: Option<serde_json::Value>,
+    pub provider_rotation: Option<Vec<ProviderRotationEntry>>,
+    pub next_round: u32,
+    pub last_round_num: u32,
+    pub rounds_summary: Vec<RoundSummary>,
+    pub total_usage: UsageStats,
+    pub integration_usage: UsageStats,
+    pub warnings: Vec<String>,
+    pub completed_round_duration_seconds: u64,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 fn format_sse(event: &str, data: &serde_json::Value) -> String {
@@ -484,6 +530,40 @@ pub async fn handle(kv: KvStore, env: &Env, workflow: &str, mut req: Request) ->
         }
     }
 
+    let integration_mode = match parse_integration_mode(auto_req.integration_mode.as_deref()) {
+        Ok(m) => m,
+        Err(msg) => return json_error(400, &msg, "bad_request", None),
+    };
+
+    let integration_model = auto_req
+        .integration_model
+        .clone()
+        .unwrap_or_else(|| DEFAULT_INTEGRATION_MODEL.to_string());
+
+    if integration_mode == IntegrationMode::Claude {
+        if env.secret("ANTHROPIC_API_KEY").is_err() {
+            return json_error(
+                500,
+                "Missing ANTHROPIC_API_KEY required for Claude integration mode",
+                "missing_config",
+                Some("Configure the ANTHROPIC_API_KEY Worker secret"),
+            );
+        }
+    }
+
+    if integration_mode == IntegrationMode::Human {
+        if let Ok(Some(_)) = kv_get::<AutoRunState>(&kv, &autorun_key(workflow)).await {
+            return json_error(
+                409,
+                &format!("An auto-run for workflow '{workflow}' is already awaiting integration"),
+                "conflict",
+                Some(&format!(
+                    "Call POST /auto/{workflow}/resume to continue, or DELETE /workflows/{workflow} to reset"
+                )),
+            );
+        }
+    }
+
     let overrides = make_overrides(&auto_req);
     let rotation = auto_req.provider_rotation.clone();
 
@@ -495,6 +575,15 @@ pub async fn handle(kv: KvStore, env: &Env, workflow: &str, mut req: Request) ->
         .unwrap_or_default();
     let wants_json = accept.contains("application/json");
     let include_integration = auto_req.include_integration.unwrap_or(false);
+
+    if integration_mode == IntegrationMode::Human && !wants_json {
+        return json_error(
+            400,
+            "Human integration mode requires JSON responses",
+            "bad_request",
+            Some("Add 'Accept: application/json' header, or use integration_mode 'claude' for streaming"),
+        );
+    }
 
     if wants_json {
         handle_json(
@@ -514,6 +603,8 @@ pub async fn handle(kv: KvStore, env: &Env, workflow: &str, mut req: Request) ->
             &rotation,
             &auto_req,
             warnings,
+            &integration_mode,
+            &integration_model,
         )
         .await
     } else {
@@ -534,6 +625,8 @@ pub async fn handle(kv: KvStore, env: &Env, workflow: &str, mut req: Request) ->
             rotation,
             auto_req,
             warnings,
+            integration_mode,
+            integration_model,
         )
     }
 }
@@ -556,12 +649,19 @@ async fn handle_json(
     rotation: &Option<Vec<ProviderRotationEntry>>,
     auto_req: &AutoRunRequest,
     mut warnings: Vec<String>,
+    integration_mode: &IntegrationMode,
+    integration_model: &str,
 ) -> Result<Response> {
     let batch_start = now_iso8601();
     let batch_start_ms = Date::now().as_millis();
     let mut summaries: Vec<RoundSummary> = Vec::new();
     let mut completed_round_duration_seconds = 0;
     let mut total_usage = UsageStats {
+        input_tokens: None,
+        output_tokens: None,
+        reasoning_tokens: None,
+    };
+    let mut integration_usage = UsageStats {
         input_tokens: None,
         output_tokens: None,
         reasoning_tokens: None,
@@ -618,6 +718,97 @@ async fn handle_json(
                     stopped_reason = "convergence".to_string();
                     break;
                 }
+
+                let is_last_round = summaries.len() >= effective_rounds as usize
+                    || round_num + 1 > MAX_ROUND_NUMBER;
+
+                if !is_last_round {
+                    match integration_mode {
+                        IntegrationMode::Claude => {
+                            match integrate_documents_claude(
+                                kv,
+                                env,
+                                workflow,
+                                &result.content,
+                                &wf.documents,
+                                integration_model,
+                            )
+                            .await
+                            {
+                                Ok(int_result) => {
+                                    accumulate_usage(
+                                        &mut integration_usage,
+                                        &Some(int_result.usage),
+                                    );
+                                }
+                                Err(e) => {
+                                    let detail =
+                                        format!("Integration after round {round_num} failed: {e}");
+                                    stopped_reason = "integration_error".to_string();
+                                    error_detail = Some(detail);
+                                    break;
+                                }
+                            }
+                        }
+                        IntegrationMode::Human => {
+                            let state = AutoRunState {
+                                workflow: workflow.to_string(),
+                                integration_mode: IntegrationMode::Human,
+                                integration_model: integration_model.to_string(),
+                                rounds_requested,
+                                effective_rounds,
+                                start_round,
+                                min_rounds,
+                                stop_on_convergence,
+                                convergence_threshold: threshold,
+                                max_duration_seconds: max_duration,
+                                include_integration,
+                                include_impl: auto_req.include_impl,
+                                provider: auto_req.provider.clone(),
+                                model: auto_req.model.clone(),
+                                system_prompt: auto_req.system_prompt.clone(),
+                                provider_params: auto_req.provider_params.clone(),
+                                provider_rotation: rotation.clone(),
+                                next_round: round_num + 1,
+                                last_round_num: round_num,
+                                rounds_summary: summaries.clone(),
+                                total_usage: total_usage.clone(),
+                                integration_usage: integration_usage.clone(),
+                                warnings: warnings.clone(),
+                                completed_round_duration_seconds,
+                                created_at: batch_start.clone(),
+                                updated_at: now_iso8601(),
+                            };
+                            kv_put(kv, &autorun_key(workflow), &state).await?;
+
+                            let elapsed_seconds = (Date::now().as_millis() - batch_start_ms) / 1000;
+                            let mut data = json!({
+                                "workflow": workflow,
+                                "rounds_completed": summaries.len(),
+                                "rounds_requested": rounds_requested,
+                                "start_round": start_round,
+                                "final_round_number": round_num,
+                                "stopped_reason": "awaiting_integration",
+                                "final_round": final_round_data,
+                                "rounds_summary": summaries,
+                                "total_usage": total_usage,
+                                "total_duration_seconds": elapsed_seconds,
+                                "next_round": round_num + 1,
+                                "integration_mode": "human",
+                            });
+                            add_duration_budget_fields(&mut data, elapsed_seconds, max_duration);
+
+                            return success_response(
+                                data,
+                                warnings,
+                                Some(&format!(
+                                    "Update documents via PUT /documents/{workflow}/{{role}}, then POST /auto/{workflow}/resume to continue"
+                                )),
+                            );
+                        }
+                        IntegrationMode::None => {}
+                    }
+                }
             }
             Err(e) if e.is_round_already_complete() => {
                 last_round_num = round_num;
@@ -641,6 +832,8 @@ async fn handle_json(
         round_num += 1;
     }
 
+    let _ = kv_delete(kv, &autorun_key(workflow)).await;
+
     let batch_end = now_iso8601();
     let total_duration = compute_batch_duration(&batch_start, &batch_end);
     let elapsed_seconds = (Date::now().as_millis() - batch_start_ms) / 1000;
@@ -659,6 +852,10 @@ async fn handle_json(
     });
     if let Some(ref detail) = error_detail {
         data["error_detail"] = json!(detail);
+    }
+    if *integration_mode != IntegrationMode::None {
+        data["integration_mode"] = json!(integration_mode);
+        data["integration_usage"] = json!(integration_usage);
     }
     add_duration_budget_fields(&mut data, elapsed_seconds, max_duration);
 
@@ -698,6 +895,8 @@ fn handle_sse(
     rotation: Option<Vec<ProviderRotationEntry>>,
     auto_req: AutoRunRequest,
     warnings: Vec<String>,
+    integration_mode: IntegrationMode,
+    integration_model: String,
 ) -> Result<Response> {
     let transform = web_sys::TransformStream::new()
         .map_err(|e| Error::JsError(format!("TransformStream::new failed: {e:?}")))?;
@@ -809,6 +1008,61 @@ fn handle_sse(
                         stopped_reason = "convergence".to_string();
                         break;
                     }
+
+                    let is_last_round = summaries.len() >= effective_rounds as usize
+                        || round_num + 1 > MAX_ROUND_NUMBER;
+
+                    if !is_last_round && integration_mode == IntegrationMode::Claude {
+                        write_sse(
+                            &writer,
+                            &format_sse("integration_start", &json!({"round": round_num})),
+                        )
+                        .await;
+
+                        match integrate_documents_claude(
+                            &kv,
+                            &env,
+                            &workflow,
+                            &result.content,
+                            &wf.documents,
+                            &integration_model,
+                        )
+                        .await
+                        {
+                            Ok(int_result) => {
+                                write_sse(
+                                    &writer,
+                                    &format_sse(
+                                        "integration_complete",
+                                        &json!({
+                                            "round": round_num,
+                                            "documents_updated": int_result.documents_updated,
+                                            "duration_seconds": int_result.duration_seconds,
+                                        }),
+                                    ),
+                                )
+                                .await;
+                            }
+                            Err(e) => {
+                                let detail =
+                                    format!("Integration after round {round_num} failed: {e}");
+                                write_sse(
+                                    &writer,
+                                    &format_sse(
+                                        "integration_error",
+                                        &json!({
+                                            "round": round_num,
+                                            "error": format!("{e}"),
+                                        }),
+                                    ),
+                                )
+                                .await;
+                                stopped_reason = "integration_error".to_string();
+                                error_detail = Some(detail);
+                                break;
+                            }
+                        }
+                    }
                 }
                 Err(e) if e.is_round_already_complete() => {
                     last_round_num = round_num;
@@ -885,6 +1139,253 @@ fn handle_sse(
     Ok(js_resp.into())
 }
 
+pub async fn handle_resume(
+    kv: KvStore,
+    env: &Env,
+    workflow: &str,
+    _req: Request,
+) -> Result<Response> {
+    if let Err(resp) = validate_workflow_name(workflow) {
+        return Ok(resp);
+    }
+
+    let state: AutoRunState = match kv_get(&kv, &autorun_key(workflow)).await? {
+        Some(s) => s,
+        None => {
+            return json_error(
+                404,
+                &format!("No pending auto-run found for workflow '{workflow}'"),
+                "not_found",
+                Some(&format!(
+                    "Start an auto-run with POST /auto/{workflow} using integration_mode 'human'"
+                )),
+            );
+        }
+    };
+
+    let wf = match kv_get::<Workflow>(&kv, &config_key(workflow)).await? {
+        Some(w) => w,
+        None => {
+            let _ = kv_delete(&kv, &autorun_key(workflow)).await;
+            return json_error(
+                404,
+                &format!("Workflow '{workflow}' no longer exists"),
+                "not_found",
+                None,
+            );
+        }
+    };
+
+    let mut summaries = state.rounds_summary;
+    let mut completed_round_duration_seconds = state.completed_round_duration_seconds;
+    let mut total_usage = state.total_usage;
+    let integration_usage = state.integration_usage;
+    let mut warnings = state.warnings;
+    let mut final_round_data: Option<serde_json::Value> = None;
+    let mut final_round_content: Option<String> = None;
+    let mut stopped_reason = "completed".to_string();
+    let mut error_detail: Option<String> = None;
+    let mut last_round_num = state.last_round_num;
+
+    let base_overrides = RunOverrides {
+        include_impl: state.include_impl,
+        skip_sequence_check: Some(true),
+        provider: state.provider.clone(),
+        model: state.model.clone(),
+        system_prompt: state.system_prompt.clone(),
+        provider_params: state.provider_params.clone(),
+    };
+
+    let mut round_num = state.next_round;
+    while summaries.len() < state.effective_rounds as usize && round_num <= MAX_ROUND_NUMBER {
+        if let Some(budget) = state.max_duration_seconds {
+            if !summaries.is_empty() {
+                let elapsed_s = completed_round_duration_seconds;
+                if should_stop_for_duration_budget(
+                    elapsed_s,
+                    completed_round_duration_seconds,
+                    summaries.len(),
+                    budget,
+                ) {
+                    stopped_reason = "duration_limit".to_string();
+                    break;
+                }
+            }
+        }
+
+        let effective_overrides = if let Some(ref rot) = state.provider_rotation {
+            let idx = rotation_index_for_round(round_num, rot.len());
+            RunOverrides {
+                include_impl: state.include_impl,
+                skip_sequence_check: Some(true),
+                provider: Some(rot[idx].provider.clone()),
+                model: Some(rot[idx].model.clone()),
+                system_prompt: state.system_prompt.clone(),
+                provider_params: Some(
+                    rot[idx]
+                        .provider_params
+                        .clone()
+                        .unwrap_or_else(|| json!({})),
+                ),
+            }
+        } else {
+            base_overrides.clone()
+        };
+
+        match execute_round(&kv, env, &wf, workflow, round_num, &effective_overrides).await {
+            Ok(result) => {
+                let summary = round_to_summary(round_num, &result);
+                final_round_data = Some(round_to_final(round_num, &result));
+                final_round_content = Some(result.content.clone());
+                accumulate_usage(&mut total_usage, &result.usage);
+                completed_round_duration_seconds += result.duration_seconds;
+                last_round_num = round_num;
+
+                let converged = state.stop_on_convergence
+                    && summaries.len() + 1 >= state.min_rounds as usize
+                    && result
+                        .convergence
+                        .score
+                        .is_some_and(|s| s >= state.convergence_threshold);
+
+                append_unique_warnings(&mut warnings, &result.template_warnings);
+                summaries.push(summary);
+
+                if converged {
+                    stopped_reason = "convergence".to_string();
+                    break;
+                }
+
+                let is_last_round = summaries.len() >= state.effective_rounds as usize
+                    || round_num + 1 > MAX_ROUND_NUMBER;
+
+                if !is_last_round {
+                    // Human mode: pause again for next integration
+                    let updated_state = AutoRunState {
+                        workflow: workflow.to_string(),
+                        integration_mode: IntegrationMode::Human,
+                        integration_model: state.integration_model.clone(),
+                        rounds_requested: state.rounds_requested,
+                        effective_rounds: state.effective_rounds,
+                        start_round: state.start_round,
+                        min_rounds: state.min_rounds,
+                        stop_on_convergence: state.stop_on_convergence,
+                        convergence_threshold: state.convergence_threshold,
+                        max_duration_seconds: state.max_duration_seconds,
+                        include_integration: state.include_integration,
+                        include_impl: state.include_impl,
+                        provider: state.provider.clone(),
+                        model: state.model.clone(),
+                        system_prompt: state.system_prompt.clone(),
+                        provider_params: state.provider_params.clone(),
+                        provider_rotation: state.provider_rotation.clone(),
+                        next_round: round_num + 1,
+                        last_round_num: round_num,
+                        rounds_summary: summaries.clone(),
+                        total_usage: total_usage.clone(),
+                        integration_usage: integration_usage.clone(),
+                        warnings: warnings.clone(),
+                        completed_round_duration_seconds,
+                        created_at: state.created_at.clone(),
+                        updated_at: now_iso8601(),
+                    };
+                    kv_put(&kv, &autorun_key(workflow), &updated_state).await?;
+
+                    let mut data = json!({
+                        "workflow": workflow,
+                        "rounds_completed": summaries.len(),
+                        "rounds_requested": state.rounds_requested,
+                        "start_round": state.start_round,
+                        "final_round_number": round_num,
+                        "stopped_reason": "awaiting_integration",
+                        "final_round": final_round_data,
+                        "rounds_summary": summaries,
+                        "total_usage": total_usage,
+                        "total_duration_seconds": completed_round_duration_seconds,
+                        "next_round": round_num + 1,
+                        "integration_mode": "human",
+                    });
+                    add_duration_budget_fields(
+                        &mut data,
+                        completed_round_duration_seconds,
+                        state.max_duration_seconds,
+                    );
+
+                    return success_response(
+                        data,
+                        warnings,
+                        Some(&format!(
+                            "Update documents via PUT /documents/{workflow}/{{role}}, then POST /auto/{workflow}/resume to continue"
+                        )),
+                    );
+                }
+            }
+            Err(e) if e.is_round_already_complete() => {
+                last_round_num = round_num;
+                round_num += 1;
+                continue;
+            }
+            Err(e) => {
+                if summaries.is_empty() {
+                    let _ = kv_delete(&kv, &autorun_key(workflow)).await;
+                    return e.into_response();
+                }
+                let detail = format!("Round {round_num} failed: {e:?}");
+                stopped_reason = "error".to_string();
+                warnings.push(format!(
+                    "{detail}. {} rounds completed before failure.",
+                    summaries.len()
+                ));
+                error_detail = Some(detail);
+                break;
+            }
+        }
+        round_num += 1;
+    }
+
+    let _ = kv_delete(&kv, &autorun_key(workflow)).await;
+
+    let mut data = json!({
+        "workflow": workflow,
+        "rounds_completed": summaries.len(),
+        "rounds_requested": state.rounds_requested,
+        "start_round": state.start_round,
+        "final_round_number": last_round_num,
+        "stopped_reason": stopped_reason,
+        "final_round": final_round_data,
+        "rounds_summary": summaries,
+        "total_usage": total_usage,
+        "total_duration_seconds": completed_round_duration_seconds,
+        "integration_mode": "human",
+        "integration_usage": integration_usage,
+    });
+    if let Some(ref detail) = error_detail {
+        data["error_detail"] = json!(detail);
+    }
+    add_duration_budget_fields(
+        &mut data,
+        completed_round_duration_seconds,
+        state.max_duration_seconds,
+    );
+
+    if state.include_integration {
+        if let Some(content) = &final_round_content {
+            data["integration_prompt"] =
+                json!(build_integration_prompt(workflow, last_round_num, content));
+        }
+    }
+
+    let hint = if error_detail.is_some() {
+        Some(format!(
+            "Use POST /auto/{workflow} to start a new auto-run, or POST /run/{workflow}/{round_num} to retry individually."
+        ))
+    } else {
+        None
+    };
+
+    success_response(data, warnings, hint.as_deref())
+}
+
 fn compute_batch_duration(started_at: &str, completed_at: &str) -> u64 {
     let Ok(start) = chrono::DateTime::parse_from_rfc3339(started_at) else {
         return 0;
@@ -939,6 +1440,8 @@ mod tests {
             system_prompt: None,
             provider_params: Some(json!({"reasoning_effort": "high"})),
             provider_rotation: None,
+            integration_mode: None,
+            integration_model: None,
         };
         let entry = ProviderRotationEntry {
             provider: "anthropic".to_string(),
@@ -1038,5 +1541,82 @@ mod tests {
         add_duration_budget_fields(&mut data, 125, Some(120));
 
         assert_eq!(data["budget_remaining_seconds"], json!(0));
+    }
+
+    #[test]
+    fn parse_integration_mode_defaults_to_none() {
+        assert_eq!(parse_integration_mode(None).unwrap(), IntegrationMode::None);
+        assert_eq!(
+            parse_integration_mode(Some("none")).unwrap(),
+            IntegrationMode::None
+        );
+    }
+
+    #[test]
+    fn parse_integration_mode_accepts_valid_values() {
+        assert_eq!(
+            parse_integration_mode(Some("claude")).unwrap(),
+            IntegrationMode::Claude
+        );
+        assert_eq!(
+            parse_integration_mode(Some("human")).unwrap(),
+            IntegrationMode::Human
+        );
+    }
+
+    #[test]
+    fn parse_integration_mode_rejects_invalid_values() {
+        assert!(parse_integration_mode(Some("auto")).is_err());
+        assert!(parse_integration_mode(Some("")).is_err());
+        assert!(parse_integration_mode(Some("CLAUDE")).is_err());
+    }
+
+    #[test]
+    fn autorun_state_serialization_roundtrip() {
+        let state = AutoRunState {
+            workflow: "demo".to_string(),
+            integration_mode: IntegrationMode::Human,
+            integration_model: "claude-sonnet-4-6".to_string(),
+            rounds_requested: 10,
+            effective_rounds: 10,
+            start_round: 1,
+            min_rounds: 2,
+            stop_on_convergence: true,
+            convergence_threshold: 0.90,
+            max_duration_seconds: Some(300),
+            include_integration: false,
+            include_impl: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            provider_params: None,
+            provider_rotation: None,
+            next_round: 4,
+            last_round_num: 3,
+            rounds_summary: vec![],
+            total_usage: UsageStats {
+                input_tokens: Some(1000),
+                output_tokens: Some(500),
+                reasoning_tokens: None,
+            },
+            integration_usage: UsageStats {
+                input_tokens: None,
+                output_tokens: None,
+                reasoning_tokens: None,
+            },
+            warnings: vec!["test warning".to_string()],
+            completed_round_duration_seconds: 90,
+            created_at: "2026-06-04T00:00:00Z".to_string(),
+            updated_at: "2026-06-04T00:01:00Z".to_string(),
+        };
+
+        let json = serde_json::to_string(&state).unwrap();
+        let deserialized: AutoRunState = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.workflow, "demo");
+        assert_eq!(deserialized.integration_mode, IntegrationMode::Human);
+        assert_eq!(deserialized.next_round, 4);
+        assert_eq!(deserialized.total_usage.input_tokens, Some(1000));
+        assert_eq!(deserialized.warnings.len(), 1);
     }
 }
