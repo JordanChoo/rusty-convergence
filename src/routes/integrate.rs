@@ -47,13 +47,7 @@ pub async fn handle(kv: KvStore, workflow: &str, round_str: &str) -> Result<Resp
     }
 
     let content = record.content.unwrap_or_default();
-
-    let prompt = format!(
-        "The following are revision suggestions from round {round} of iterative specification \
-         review for the \"{workflow}\" specification. Apply each suggested change to the \
-         specification document, preserving the existing structure where possible. For each \
-         change, explain what you modified and why.\n\n---\n\n{content}"
-    );
+    let prompt = build_integration_prompt(workflow, round, &content);
 
     success_response(
         json!({
@@ -63,5 +57,14 @@ pub async fn handle(kv: KvStore, workflow: &str, round_str: &str) -> Result<Resp
         }),
         vec![],
         Some("Provide the current spec and README alongside this prompt to give the coding agent full context."),
+    )
+}
+
+pub fn build_integration_prompt(workflow: &str, round: u32, content: &str) -> String {
+    format!(
+        "The following are revision suggestions from round {round} of iterative specification \
+         review for the \"{workflow}\" specification. Apply each suggested change to the \
+         specification document, preserving the existing structure where possible. For each \
+         change, explain what you modified and why.\n\n---\n\n{content}"
     )
 }

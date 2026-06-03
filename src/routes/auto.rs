@@ -6,6 +6,7 @@ use worker::wasm_bindgen_futures::spawn_local;
 use worker::*;
 
 use crate::error::{json_error, now_iso8601, success_response};
+use crate::routes::integrate::build_integration_prompt;
 use crate::routes::run::{execute_round, RoundResult};
 use crate::storage::{config_key, kv_get, meta_key, round_key};
 use crate::types::{Meta, Round, RoundStatus, RunOverrides, UsageStats, Workflow};
@@ -14,17 +15,27 @@ use crate::validation::validate_workflow_name;
 const DEFAULT_MAX_AUTO_ROUNDS: u32 = 20;
 const MAX_ROUND_NUMBER: u32 = 999;
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderRotationEntry {
+    pub provider: String,
+    pub model: String,
+    pub provider_params: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AutoRunRequest {
     pub rounds: Option<u32>,
     pub min_rounds: Option<u32>,
     pub stop_on_convergence: Option<bool>,
     pub convergence_threshold: Option<f64>,
+    pub max_duration_seconds: Option<u64>,
+    pub include_integration: Option<bool>,
     pub include_impl: Option<bool>,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub system_prompt: Option<String>,
     pub provider_params: Option<serde_json::Value>,
+    pub provider_rotation: Option<Vec<ProviderRotationEntry>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -53,6 +64,17 @@ fn make_overrides(req: &AutoRunRequest) -> RunOverrides {
         model: req.model.clone(),
         system_prompt: req.system_prompt.clone(),
         provider_params: req.provider_params.clone(),
+    }
+}
+
+fn make_rotated_overrides(req: &AutoRunRequest, entry: &ProviderRotationEntry) -> RunOverrides {
+    RunOverrides {
+        include_impl: req.include_impl,
+        skip_sequence_check: Some(true),
+        provider: Some(entry.provider.clone()),
+        model: Some(entry.model.clone()),
+        system_prompt: req.system_prompt.clone(),
+        provider_params: entry.provider_params.clone(),
     }
 }
 
@@ -108,6 +130,40 @@ fn format_sse(event: &str, data: &serde_json::Value) -> String {
 
 fn format_sse_comment(text: &str) -> String {
     format!(": {text}\n\n")
+}
+
+fn should_stop_for_duration_budget(
+    elapsed_seconds: u64,
+    completed_round_duration_seconds: u64,
+    rounds_completed: usize,
+    budget_seconds: u64,
+) -> bool {
+    if rounds_completed == 0 {
+        return false;
+    }
+
+    let avg_round_seconds = completed_round_duration_seconds / rounds_completed as u64;
+    elapsed_seconds + avg_round_seconds > budget_seconds
+}
+
+fn add_duration_budget_fields(
+    data: &mut serde_json::Value,
+    elapsed_seconds: u64,
+    max_duration: Option<u64>,
+) {
+    let Some(budget_seconds) = max_duration else {
+        return;
+    };
+    let Some(obj) = data.as_object_mut() else {
+        return;
+    };
+
+    obj.insert("elapsed_seconds".to_string(), json!(elapsed_seconds));
+    obj.insert("budget_seconds".to_string(), json!(budget_seconds));
+    obj.insert(
+        "budget_remaining_seconds".to_string(),
+        json!(budget_seconds.saturating_sub(elapsed_seconds)),
+    );
 }
 
 async fn write_sse(writer: &web_sys::WritableStreamDefaultWriter, text: &str) {
@@ -283,6 +339,18 @@ pub async fn handle(kv: KvStore, env: &Env, workflow: &str, mut req: Request) ->
         );
     }
 
+    let max_duration = auto_req.max_duration_seconds;
+    if let Some(d) = max_duration {
+        if d < 30 {
+            return json_error(
+                400,
+                &format!("'max_duration_seconds' must be >= 30, got {d}"),
+                "bad_request",
+                Some("A single LLM round typically takes 30-120 seconds"),
+            );
+        }
+    }
+
     let (start_round, detection_warnings) = match detect_start_round(&kv, workflow).await {
         Ok(r) => r,
         Err(e) => return Err(e),
@@ -314,7 +382,53 @@ pub async fn handle(kv: KvStore, env: &Env, workflow: &str, mut req: Request) ->
             .push("Low convergence_threshold may cause premature stop after round 2".to_string());
     }
 
+    if auto_req.provider_rotation.is_some()
+        && (auto_req.provider.is_some()
+            || auto_req.model.is_some()
+            || auto_req.provider_params.is_some())
+    {
+        return json_error(
+            400,
+            "'provider_rotation' cannot be combined with top-level 'provider', 'model', or 'provider_params'",
+            "bad_request",
+            Some("Use provider_rotation entries or top-level overrides, not both"),
+        );
+    }
+
+    if let Some(rotation) = &auto_req.provider_rotation {
+        if rotation.is_empty() {
+            return json_error(
+                400,
+                "'provider_rotation' must have at least one entry",
+                "bad_request",
+                None,
+            );
+        }
+        for (i, entry) in rotation.iter().enumerate() {
+            if entry.provider != "openai" && entry.provider != "anthropic" {
+                return json_error(
+                    400,
+                    &format!(
+                        "provider_rotation[{i}]: invalid provider '{}'. Must be 'openai' or 'anthropic'",
+                        entry.provider
+                    ),
+                    "bad_request",
+                    None,
+                );
+            }
+            if entry.model.is_empty() {
+                return json_error(
+                    400,
+                    &format!("provider_rotation[{i}]: model must not be empty"),
+                    "bad_request",
+                    None,
+                );
+            }
+        }
+    }
+
     let overrides = make_overrides(&auto_req);
+    let rotation = auto_req.provider_rotation.clone();
 
     let accept = req
         .headers()
@@ -323,6 +437,7 @@ pub async fn handle(kv: KvStore, env: &Env, workflow: &str, mut req: Request) ->
         .flatten()
         .unwrap_or_default();
     let wants_json = accept.contains("application/json");
+    let include_integration = auto_req.include_integration.unwrap_or(false);
 
     if wants_json {
         handle_json(
@@ -336,7 +451,11 @@ pub async fn handle(kv: KvStore, env: &Env, workflow: &str, mut req: Request) ->
             min_rounds,
             stop_on_convergence,
             threshold,
+            max_duration,
+            include_integration,
             &overrides,
+            &rotation,
+            &auto_req,
             warnings,
         )
         .await
@@ -352,7 +471,11 @@ pub async fn handle(kv: KvStore, env: &Env, workflow: &str, mut req: Request) ->
             min_rounds,
             stop_on_convergence,
             threshold,
+            max_duration,
+            include_integration,
             overrides,
+            rotation,
+            auto_req,
             warnings,
         )
     }
@@ -370,29 +493,61 @@ async fn handle_json(
     min_rounds: u32,
     stop_on_convergence: bool,
     threshold: f64,
+    max_duration: Option<u64>,
+    include_integration: bool,
     overrides: &RunOverrides,
+    rotation: &Option<Vec<ProviderRotationEntry>>,
+    auto_req: &AutoRunRequest,
     mut warnings: Vec<String>,
 ) -> Result<Response> {
     let batch_start = now_iso8601();
+    let batch_start_ms = Date::now().as_millis();
     let mut summaries: Vec<RoundSummary> = Vec::new();
+    let mut completed_round_duration_seconds = 0;
     let mut total_usage = UsageStats {
         input_tokens: None,
         output_tokens: None,
         reasoning_tokens: None,
     };
     let mut final_round_data: Option<serde_json::Value> = None;
+    let mut final_round_content: Option<String> = None;
     let mut stopped_reason = "completed".to_string();
     let mut last_round_num = start_round;
 
     for i in 0..effective_rounds {
         let round_num = start_round + i;
-        last_round_num = round_num;
 
-        match execute_round(kv, env, wf, workflow, round_num, overrides).await {
+        if let Some(budget) = max_duration {
+            if !summaries.is_empty() {
+                let elapsed_ms = Date::now().as_millis() - batch_start_ms;
+                let elapsed_s = elapsed_ms / 1000;
+                if should_stop_for_duration_budget(
+                    elapsed_s,
+                    completed_round_duration_seconds,
+                    summaries.len(),
+                    budget,
+                ) {
+                    stopped_reason = "duration_limit".to_string();
+                    break;
+                }
+            }
+        }
+
+        let effective_overrides = if let Some(rot) = rotation {
+            let idx = ((round_num - 1) as usize) % rot.len();
+            make_rotated_overrides(auto_req, &rot[idx])
+        } else {
+            overrides.clone()
+        };
+
+        match execute_round(kv, env, wf, workflow, round_num, &effective_overrides).await {
             Ok(result) => {
                 let summary = round_to_summary(round_num, &result);
                 final_round_data = Some(round_to_final(round_num, &result));
+                final_round_content = Some(result.content.clone());
                 accumulate_usage(&mut total_usage, &result.usage);
+                completed_round_duration_seconds += result.duration_seconds;
+                last_round_num = round_num;
 
                 let converged = stop_on_convergence
                     && summaries.len() + 1 >= min_rounds as usize
@@ -427,22 +582,29 @@ async fn handle_json(
 
     let batch_end = now_iso8601();
     let total_duration = compute_batch_duration(&batch_start, &batch_end);
+    let elapsed_seconds = (Date::now().as_millis() - batch_start_ms) / 1000;
 
-    success_response(
-        json!({
-            "rounds_completed": summaries.len(),
-            "rounds_requested": rounds_requested,
-            "start_round": start_round,
-            "final_round_number": last_round_num,
-            "stopped_reason": stopped_reason,
-            "final_round": final_round_data,
-            "rounds_summary": summaries,
-            "total_usage": total_usage,
-            "total_duration_seconds": total_duration,
-        }),
-        warnings,
-        None,
-    )
+    let mut data = json!({
+        "rounds_completed": summaries.len(),
+        "rounds_requested": rounds_requested,
+        "start_round": start_round,
+        "final_round_number": last_round_num,
+        "stopped_reason": stopped_reason,
+        "final_round": final_round_data,
+        "rounds_summary": summaries,
+        "total_usage": total_usage,
+        "total_duration_seconds": total_duration,
+    });
+    add_duration_budget_fields(&mut data, elapsed_seconds, max_duration);
+
+    if include_integration {
+        if let Some(content) = &final_round_content {
+            data["integration_prompt"] =
+                json!(build_integration_prompt(workflow, last_round_num, content));
+        }
+    }
+
+    success_response(data, warnings, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -457,7 +619,11 @@ fn handle_sse(
     min_rounds: u32,
     stop_on_convergence: bool,
     threshold: f64,
+    max_duration: Option<u64>,
+    include_integration: bool,
     overrides: RunOverrides,
+    rotation: Option<Vec<ProviderRotationEntry>>,
+    auto_req: AutoRunRequest,
     warnings: Vec<String>,
 ) -> Result<Response> {
     let transform = web_sys::TransformStream::new()
@@ -479,19 +645,37 @@ fn handle_sse(
             .await;
         }
 
+        let batch_start_ms = Date::now().as_millis();
         let mut summaries: Vec<RoundSummary> = Vec::new();
+        let mut completed_round_duration_seconds = 0;
         let mut total_usage = UsageStats {
             input_tokens: None,
             output_tokens: None,
             reasoning_tokens: None,
         };
         let mut final_round_data: Option<serde_json::Value> = None;
+        let mut final_round_content: Option<String> = None;
         let mut stopped_reason = "completed".to_string();
         let mut last_round_num = start_round;
 
         for i in 0..effective_rounds {
             let round_num = start_round + i;
-            last_round_num = round_num;
+
+            if let Some(budget) = max_duration {
+                if !summaries.is_empty() {
+                    let elapsed_ms = Date::now().as_millis() - batch_start_ms;
+                    let elapsed_s = elapsed_ms / 1000;
+                    if should_stop_for_duration_budget(
+                        elapsed_s,
+                        completed_round_duration_seconds,
+                        summaries.len(),
+                        budget,
+                    ) {
+                        stopped_reason = "duration_limit".to_string();
+                        break;
+                    }
+                }
+            }
 
             write_sse(
                 &writer,
@@ -505,7 +689,14 @@ fn handle_sse(
             )
             .await;
 
-            match execute_round(&kv, &env, &wf, &workflow, round_num, &overrides).await {
+            let effective_overrides = if let Some(rot) = &rotation {
+                let idx = ((round_num - 1) as usize) % rot.len();
+                make_rotated_overrides(&auto_req, &rot[idx])
+            } else {
+                overrides.clone()
+            };
+
+            match execute_round(&kv, &env, &wf, &workflow, round_num, &effective_overrides).await {
                 Ok(result) => {
                     let summary = round_to_summary(round_num, &result);
 
@@ -527,7 +718,10 @@ fn handle_sse(
                     .await;
 
                     final_round_data = Some(round_to_final(round_num, &result));
+                    final_round_content = Some(result.content.clone());
                     accumulate_usage(&mut total_usage, &result.usage);
+                    completed_round_duration_seconds += result.duration_seconds;
+                    last_round_num = round_num;
 
                     let converged = stop_on_convergence
                         && summaries.len() + 1 >= min_rounds as usize
@@ -558,7 +752,8 @@ fn handle_sse(
             }
         }
 
-        let done_data = json!({
+        let total_elapsed_s = (Date::now().as_millis() - batch_start_ms) / 1000;
+        let mut done_data = json!({
             "rounds_completed": summaries.len(),
             "rounds_requested": rounds_requested,
             "start_round": start_round,
@@ -567,8 +762,15 @@ fn handle_sse(
             "final_round": final_round_data,
             "rounds_summary": summaries,
             "total_usage": total_usage,
-            "total_duration_seconds": 0,
+            "total_duration_seconds": total_elapsed_s,
         });
+        add_duration_budget_fields(&mut done_data, total_elapsed_s, max_duration);
+        if include_integration {
+            if let Some(content) = &final_round_content {
+                done_data["integration_prompt"] =
+                    json!(build_integration_prompt(&workflow, last_round_num, content));
+            }
+        }
         write_sse(&writer, &format_sse("done", &done_data)).await;
 
         let _ = wasm_bindgen_futures::JsFuture::from(writer.close()).await;
@@ -605,5 +807,56 @@ fn compute_batch_duration(started_at: &str, completed_at: &str) -> u64 {
         diff as u64
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duration_budget_allows_first_round() {
+        assert!(!should_stop_for_duration_budget(45, 0, 0, 30));
+    }
+
+    #[test]
+    fn duration_budget_stops_when_next_round_would_exceed_budget() {
+        assert!(should_stop_for_duration_budget(90, 90, 2, 120));
+    }
+
+    #[test]
+    fn duration_budget_continues_when_next_round_fits_budget() {
+        assert!(!should_stop_for_duration_budget(60, 60, 2, 120));
+    }
+
+    #[test]
+    fn duration_budget_fields_are_absent_without_budget() {
+        let mut data = json!({});
+
+        add_duration_budget_fields(&mut data, 75, None);
+
+        assert!(data.get("elapsed_seconds").is_none());
+        assert!(data.get("budget_seconds").is_none());
+        assert!(data.get("budget_remaining_seconds").is_none());
+    }
+
+    #[test]
+    fn duration_budget_fields_include_remaining_time() {
+        let mut data = json!({});
+
+        add_duration_budget_fields(&mut data, 75, Some(120));
+
+        assert_eq!(data["elapsed_seconds"], json!(75));
+        assert_eq!(data["budget_seconds"], json!(120));
+        assert_eq!(data["budget_remaining_seconds"], json!(45));
+    }
+
+    #[test]
+    fn duration_budget_remaining_time_saturates_at_zero() {
+        let mut data = json!({});
+
+        add_duration_budget_fields(&mut data, 125, Some(120));
+
+        assert_eq!(data["budget_remaining_seconds"], json!(0));
     }
 }
