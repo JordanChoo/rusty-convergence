@@ -540,15 +540,13 @@ pub async fn handle(kv: KvStore, env: &Env, workflow: &str, mut req: Request) ->
         .clone()
         .unwrap_or_else(|| DEFAULT_INTEGRATION_MODEL.to_string());
 
-    if integration_mode == IntegrationMode::Claude {
-        if env.secret("ANTHROPIC_API_KEY").is_err() {
-            return json_error(
-                500,
-                "Missing ANTHROPIC_API_KEY required for Claude integration mode",
-                "missing_config",
-                Some("Configure the ANTHROPIC_API_KEY Worker secret"),
-            );
-        }
+    if integration_mode == IntegrationMode::Claude && env.secret("ANTHROPIC_API_KEY").is_err() {
+        return json_error(
+            500,
+            "Missing ANTHROPIC_API_KEY required for Claude integration mode",
+            "missing_config",
+            Some("Configure the ANTHROPIC_API_KEY Worker secret"),
+        );
     }
 
     if integration_mode == IntegrationMode::Human {

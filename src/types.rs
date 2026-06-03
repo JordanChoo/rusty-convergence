@@ -2,18 +2,13 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum IntegrationMode {
+    #[default]
     None,
     Claude,
     Human,
-}
-
-impl Default for IntegrationMode {
-    fn default() -> Self {
-        IntegrationMode::None
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
