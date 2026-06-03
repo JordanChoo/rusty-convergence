@@ -7,7 +7,7 @@ use worker::*;
 
 use crate::error::{json_error, now_iso8601, success_response};
 use crate::routes::integrate::build_integration_prompt;
-use crate::routes::run::{execute_round, RoundResult};
+use crate::routes::run::{execute_round, ExecutionError, RoundResult};
 use crate::storage::{
     config_key, kv_get, kv_list_by_prefix, meta_key, parse_round_number_from_key,
 };
@@ -615,6 +615,10 @@ async fn handle_json(
                     break;
                 }
             }
+            Err(e) if e.is_round_already_complete() => {
+                last_round_num = round_num;
+                continue;
+            }
             Err(e) => {
                 if summaries.is_empty() {
                     return e.into_response();
@@ -783,6 +787,10 @@ fn handle_sse(
                         stopped_reason = "convergence".to_string();
                         break;
                     }
+                }
+                Err(e) if e.is_round_already_complete() => {
+                    last_round_num = round_num;
+                    continue;
                 }
                 Err(e) => {
                     write_sse(

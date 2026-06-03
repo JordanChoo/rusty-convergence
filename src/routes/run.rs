@@ -113,6 +113,10 @@ pub enum ExecutionError {
 }
 
 impl ExecutionError {
+    pub fn is_round_already_complete(&self) -> bool {
+        matches!(self, Self::Conflict(msg, _) if msg.contains("already completed"))
+    }
+
     pub fn into_response(self) -> Result<Response> {
         match self {
             Self::Conflict(msg, hint) => json_error(409, &msg, "conflict", hint.as_deref()),
