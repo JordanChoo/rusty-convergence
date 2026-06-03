@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # E2E Real LLM Test — tests against real OpenAI/Anthropic APIs
-# Requires: CSVKEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_MODEL, WORKER_URL env vars
+# Requires: CSVKEY, ANTHROPIC_MODEL, WORKER_URL env vars
+# The deployed Worker must have OPENAI_API_KEY and ANTHROPIC_API_KEY secrets configured.
 # Usage: CSVKEY=xxx WORKER_URL=https://your-worker.dev ANTHROPIC_MODEL=claude-... ./tests/e2e_real_llm.sh
 #
 # WARNING: This script makes real LLM API calls that cost money.
@@ -10,8 +11,6 @@ set -euo pipefail
 
 : "${CSVKEY:?Set CSVKEY env var}"
 : "${WORKER_URL:?Set WORKER_URL env var}"
-: "${OPENAI_API_KEY:?Set OPENAI_API_KEY env var (needed by the Worker, not this script)}"
-: "${ANTHROPIC_API_KEY:?Set ANTHROPIC_API_KEY env var (needed by the Worker, not this script)}"
 : "${ANTHROPIC_MODEL:?Set ANTHROPIC_MODEL env var (Claude model enabled for your account)}"
 
 OPENAI_MODEL="${OPENAI_MODEL:-o3-mini}"
@@ -24,7 +23,7 @@ TOTAL=0
 RUN_ID="$(date +%s)"
 OPENAI_WF_NAME="e2e-test-openai-${RUN_ID}"
 ANTHROPIC_WF_NAME="e2e-test-anthropic-${RUN_ID}"
-LOGDIR="logs"
+LOGDIR="${LOGDIR:-logs}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOGFILE="${LOGDIR}/e2e_llm_${TIMESTAMP}.log"
 mkdir -p "$LOGDIR"
@@ -78,15 +77,69 @@ print('nonempty' if v and str(v).strip() else 'empty')
     fi
 }
 
+worker_secret_configured() {
+    local secret_name="$1"
+    python3 - "$secret_name" /tmp/e2e_body <<'PY' 2>/dev/null || true
+import json
+import sys
+
+secret_name = sys.argv[1]
+body_path = sys.argv[2]
+with open(body_path, encoding="utf-8") as fh:
+    body = json.load(fh)
+
+configured = (
+    body.get("data", {})
+    .get("diagnostics", {})
+    .get("secrets", {})
+    .get(secret_name)
+)
+print("true" if configured is True else "false")
+PY
+}
+
+preflight_provider_secrets() {
+    log "Preflight: deployed Worker provider secrets"
+    STATUS=$(api "${WORKER_URL}/health?csvkey=${CSVKEY}")
+    assert_status "GET /health provider diagnostics" "200" "$STATUS"
+    if [[ "$STATUS" != "200" ]]; then
+        log ""
+        log "Provider secret preflight failed; stopping before billable LLM calls."
+        log "Check WORKER_URL, CSVKEY, and the Worker health endpoint, then rerun this test."
+        exit 1
+    fi
+
+    local missing=0 secret configured
+    for secret in OPENAI_API_KEY ANTHROPIC_API_KEY; do
+        TOTAL=$((TOTAL + 1))
+        configured=$(worker_secret_configured "$secret")
+        if [[ "$configured" == "true" ]]; then
+            log "  PASS: ${secret} is configured in the deployed Worker"
+            PASS=$((PASS + 1))
+        else
+            log "  FAIL: ${secret} is missing from deployed Worker secrets"
+            FAIL=$((FAIL + 1))
+            missing=1
+        fi
+    done
+
+    if [[ "$missing" -ne 0 ]]; then
+        log ""
+        log "Provider secret preflight failed; stopping before billable LLM calls."
+        log "Configure the missing Worker secret(s), redeploy if needed, and rerun this test."
+        exit 1
+    fi
+}
+
 # shellcheck disable=SC2317
 cleanup() {
     for wf in "$OPENAI_WF_NAME" "$ANTHROPIC_WF_NAME"; do
         log "Cleanup: DELETE /workflows/${wf}"
-        api -X DELETE "${WORKER_URL}/workflows/${wf}?csvkey=${CSVKEY}"
-        log "  Cleanup done (status=$(python3 -c "import json,sys; print(json.load(sys.stdin).get('code','?'))" < /tmp/e2e_body 2>/dev/null || echo '?'))"
+        local http_status
+        http_status=$(api -X DELETE "${WORKER_URL}/workflows/${wf}?csvkey=${CSVKEY}")
+        log "  Cleanup done (http_status=${http_status} code=$(python3 -c "import json,sys; print(json.load(sys.stdin).get('code','?'))" < /tmp/e2e_body 2>/dev/null || echo '?'))"
     done
 }
-trap cleanup EXIT
 
 upload_docs() {
     local wf_name="$1"
@@ -109,6 +162,9 @@ log "Worker: $WORKER_URL"
 log "OpenAI workflow: $OPENAI_WF_NAME"
 log "Anthropic workflow: $ANTHROPIC_WF_NAME"
 log ""
+
+preflight_provider_secrets
+trap cleanup EXIT
 
 # Step 1: Upload OpenAI documents
 log "Step 1: Upload OpenAI documents"

@@ -774,15 +774,15 @@ The repository also includes deployed-worker smoke tests:
 ./tests/e2e_error_sweep.sh
 CSVKEY="$CSVKEY" \
 WORKER_URL="$WORKER_URL" \
-OPENAI_API_KEY="$OPENAI_API_KEY" \
-ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
 ANTHROPIC_MODEL="<anthropic-model-id>" \
 ./tests/e2e_real_llm.sh
 ```
 
-The real-LLM test makes billable provider calls. It creates separate OpenAI and
-Anthropic workflows, runs live rounds, validates persisted round data, checks
-stats, and cleans up the workflows at exit.
+The real-LLM test first checks authenticated health diagnostics to confirm the
+deployed Worker has `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` configured. It then
+makes billable provider calls, creates separate OpenAI and Anthropic workflows,
+runs live rounds, validates persisted round data, checks stats, and cleans up
+the workflows at exit.
 
 ## Security Model
 
