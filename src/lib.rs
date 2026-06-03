@@ -66,12 +66,10 @@ async fn handle_request(req: Request, env: Env) -> Result<Response> {
     console_log!("route_dispatch handler={}", handler_name);
 
     let result = match segments.as_slice() {
-        [] | ["health"] => {
-            if method != Method::Get {
-                return json_error(405, "Method not allowed", "method_not_allowed", None);
-            }
-            routes::health::handle(env).await
-        }
+        [] | ["health"] => match method {
+            Method::Get => routes::health::handle(env, &url).await,
+            _ => json_error(405, "Method not allowed", "method_not_allowed", None),
+        },
 
         ["workflows"] => {
             let kv = require_auth!(&url, &env);
@@ -102,61 +100,61 @@ async fn handle_request(req: Request, env: Env) -> Result<Response> {
             }
         }
 
-        ["run", workflow, round_str] => {
-            if method != Method::Post {
-                return json_error(405, "Method not allowed", "method_not_allowed", None);
+        ["run", workflow, round_str] => match method {
+            Method::Post => {
+                let kv = require_auth!(&url, &env);
+                routes::run::handle(kv, &env, workflow, round_str, req).await
             }
-            let kv = require_auth!(&url, &env);
-            routes::run::handle(kv, &env, workflow, round_str, req).await
-        }
+            _ => json_error(405, "Method not allowed", "method_not_allowed", None),
+        },
 
-        ["rounds", workflow, round_str] => {
-            if method != Method::Get {
-                return json_error(405, "Method not allowed", "method_not_allowed", None);
+        ["rounds", workflow, round_str] => match method {
+            Method::Get => {
+                let kv = require_auth!(&url, &env);
+                routes::rounds::handle_get(kv, &env, workflow, round_str, &req).await
             }
-            let kv = require_auth!(&url, &env);
-            routes::rounds::handle_get(kv, &env, workflow, round_str, &req).await
-        }
+            _ => json_error(405, "Method not allowed", "method_not_allowed", None),
+        },
 
-        ["rounds", workflow] => {
-            if method != Method::Get {
-                return json_error(405, "Method not allowed", "method_not_allowed", None);
+        ["rounds", workflow] => match method {
+            Method::Get => {
+                let kv = require_auth!(&url, &env);
+                routes::rounds::handle_list(kv, &env, workflow, &url).await
             }
-            let kv = require_auth!(&url, &env);
-            routes::rounds::handle_list(kv, &env, workflow, &url).await
-        }
+            _ => json_error(405, "Method not allowed", "method_not_allowed", None),
+        },
 
-        ["stats", workflow, "rebuild"] => {
-            if method != Method::Post {
-                return json_error(405, "Method not allowed", "method_not_allowed", None);
+        ["stats", workflow, "rebuild"] => match method {
+            Method::Post => {
+                let kv = require_auth!(&url, &env);
+                routes::stats::handle_rebuild(kv, workflow).await
             }
-            let kv = require_auth!(&url, &env);
-            routes::stats::handle_rebuild(kv, workflow).await
-        }
+            _ => json_error(405, "Method not allowed", "method_not_allowed", None),
+        },
 
-        ["stats", workflow] => {
-            if method != Method::Get {
-                return json_error(405, "Method not allowed", "method_not_allowed", None);
+        ["stats", workflow] => match method {
+            Method::Get => {
+                let kv = require_auth!(&url, &env);
+                routes::stats::handle_get(kv, workflow).await
             }
-            let kv = require_auth!(&url, &env);
-            routes::stats::handle_get(kv, workflow).await
-        }
+            _ => json_error(405, "Method not allowed", "method_not_allowed", None),
+        },
 
-        ["integrate", workflow, round_str] => {
-            if method != Method::Post {
-                return json_error(405, "Method not allowed", "method_not_allowed", None);
+        ["integrate", workflow, round_str] => match method {
+            Method::Post => {
+                let kv = require_auth!(&url, &env);
+                routes::integrate::handle(kv, workflow, round_str).await
             }
-            let kv = require_auth!(&url, &env);
-            routes::integrate::handle(kv, workflow, round_str).await
-        }
+            _ => json_error(405, "Method not allowed", "method_not_allowed", None),
+        },
 
-        ["auto", workflow] => {
-            if method != Method::Post {
-                return json_error(405, "Method not allowed", "method_not_allowed", None);
+        ["auto", workflow] => match method {
+            Method::Post => {
+                let kv = require_auth!(&url, &env);
+                routes::auto::handle(kv, &env, workflow, req).await
             }
-            let kv = require_auth!(&url, &env);
-            routes::auto::handle(kv, &env, workflow, req).await
-        }
+            _ => json_error(405, "Method not allowed", "method_not_allowed", None),
+        },
 
         _ => json_error(404, "Not found", "not_found", None),
     };

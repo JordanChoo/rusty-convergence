@@ -191,6 +191,10 @@ The expected value is stored as a Cloudflare Worker secret named `CSVKEY`.
 Comparison uses a constant-time XOR-and-fold check to avoid early-exit timing
 leaks.
 
+`GET /health` remains public for version and KV checks. Supplying a valid
+`csvkey` adds authenticated diagnostics for Worker secret presence; missing
+provider secrets appear as response warnings without exposing secret values.
+
 Treat this as single-tenant internal-tool authentication. Because the key is in
 the URL, public or multi-tenant deployments need a different auth model.
 
@@ -235,7 +239,7 @@ Common error codes:
 
 | Method | Route | Auth | Purpose |
 | --- | --- | --- | --- |
-| `GET` | `/health` | no | Version and KV binding availability check |
+| `GET` | `/health` | optional | Version and KV binding availability check; with a valid `csvkey`, includes provider secret diagnostics |
 | `GET` | `/workflows` | yes | List workflow configs |
 | `POST` | `/workflows` | yes | Create or update a workflow config |
 | `GET` | `/workflows/:name` | yes | Read one workflow with derived metadata |
@@ -263,6 +267,12 @@ Check health:
 
 ```bash
 curl "$WORKER_URL/health"
+```
+
+Check authenticated provider secret diagnostics without making provider calls:
+
+```bash
+curl "$WORKER_URL/health?csvkey=$CSVKEY"
 ```
 
 Upload source documents before creating the workflow. Workflow creation
@@ -726,6 +736,7 @@ Verify the deployed Worker:
 
 ```bash
 ./scripts/verify-deploy.sh "https://rusty-convergence.<your-subdomain>.workers.dev" "$CSVKEY"
+curl "https://rusty-convergence.<your-subdomain>.workers.dev/health?csvkey=$CSVKEY"
 ```
 
 ## Local Development
