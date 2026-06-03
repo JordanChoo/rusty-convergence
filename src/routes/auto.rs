@@ -9,7 +9,7 @@ use crate::error::{json_error, now_iso8601, success_response};
 use crate::routes::integrate::build_integration_prompt;
 use crate::routes::run::{execute_round, RoundResult};
 use crate::storage::{
-    config_key, kv_get, kv_list_by_prefix, meta_key, parse_round_number_from_key, round_key,
+    config_key, kv_get, kv_list_by_prefix, meta_key, parse_round_number_from_key,
 };
 use crate::types::{Meta, Round, RoundStatus, RunOverrides, UsageStats, Workflow};
 use crate::validation::validate_workflow_name;
@@ -918,11 +918,9 @@ mod tests {
         let (start, warnings) = determine_start_round_from_completed(&[1, 2, 3, 5], 5);
 
         assert_eq!(start, 4);
-        assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("Non-contiguous round history"))
-        );
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("Non-contiguous round history")));
         assert!(warnings.iter().any(|w| w.contains("meta.latest_round")));
     }
 
