@@ -47,6 +47,8 @@ struct RoundSummary {
     duration_seconds: u64,
     provider: String,
     model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_params: Option<serde_json::Value>,
 }
 
 fn max_auto_rounds(env: &Env) -> u32 {
@@ -78,6 +80,10 @@ fn make_rotated_overrides(req: &AutoRunRequest, entry: &ProviderRotationEntry) -
     }
 }
 
+fn rotation_index_for_round(round_num: u32, rotation_len: usize) -> usize {
+    ((round_num - 1) as usize) % rotation_len
+}
+
 fn round_to_summary(round_num: u32, result: &RoundResult) -> RoundSummary {
     RoundSummary {
         round: round_num,
@@ -87,6 +93,7 @@ fn round_to_summary(round_num: u32, result: &RoundResult) -> RoundSummary {
         duration_seconds: result.duration_seconds,
         provider: result.provider.clone(),
         model: result.model.clone(),
+        provider_params: result.provider_params.clone(),
     }
 }
 
@@ -109,6 +116,7 @@ fn round_to_final(round_num: u32, result: &RoundResult) -> serde_json::Value {
         "usage": result.usage,
         "provider": result.provider,
         "model": result.model,
+        "provider_params": result.provider_params,
         "started_at": result.started_at,
         "completed_at": result.completed_at,
         "duration_seconds": result.duration_seconds,
@@ -404,6 +412,16 @@ pub async fn handle(kv: KvStore, env: &Env, workflow: &str, mut req: Request) ->
                 None,
             );
         }
+        if rotation.len() > 10 {
+            return json_error(
+                400,
+                "'provider_rotation' must have at most 10 entries",
+                "bad_request",
+                None,
+            );
+        }
+        let mut needs_openai = false;
+        let mut needs_anthropic = false;
         for (i, entry) in rotation.iter().enumerate() {
             if entry.provider != "openai" && entry.provider != "anthropic" {
                 return json_error(
@@ -416,7 +434,7 @@ pub async fn handle(kv: KvStore, env: &Env, workflow: &str, mut req: Request) ->
                     None,
                 );
             }
-            if entry.model.is_empty() {
+            if entry.model.trim().is_empty() {
                 return json_error(
                     400,
                     &format!("provider_rotation[{i}]: model must not be empty"),
@@ -424,6 +442,28 @@ pub async fn handle(kv: KvStore, env: &Env, workflow: &str, mut req: Request) ->
                     None,
                 );
             }
+            if entry.provider == "openai" {
+                needs_openai = true;
+            }
+            if entry.provider == "anthropic" {
+                needs_anthropic = true;
+            }
+        }
+        if needs_openai && env.secret("OPENAI_API_KEY").is_err() {
+            return json_error(
+                500,
+                "Missing secret required by provider_rotation: OPENAI_API_KEY",
+                "missing_config",
+                Some("Configure the OPENAI_API_KEY Worker secret before using this rotation"),
+            );
+        }
+        if needs_anthropic && env.secret("ANTHROPIC_API_KEY").is_err() {
+            return json_error(
+                500,
+                "Missing secret required by provider_rotation: ANTHROPIC_API_KEY",
+                "missing_config",
+                Some("Configure the ANTHROPIC_API_KEY Worker secret before using this rotation"),
+            );
         }
     }
 
@@ -534,7 +574,7 @@ async fn handle_json(
         }
 
         let effective_overrides = if let Some(rot) = rotation {
-            let idx = ((round_num - 1) as usize) % rot.len();
+            let idx = rotation_index_for_round(round_num, rot.len());
             make_rotated_overrides(auto_req, &rot[idx])
         } else {
             overrides.clone()
@@ -690,7 +730,7 @@ fn handle_sse(
             .await;
 
             let effective_overrides = if let Some(rot) = &rotation {
-                let idx = ((round_num - 1) as usize) % rot.len();
+                let idx = rotation_index_for_round(round_num, rot.len());
                 make_rotated_overrides(&auto_req, &rot[idx])
             } else {
                 overrides.clone()
@@ -817,6 +857,21 @@ mod tests {
     #[test]
     fn duration_budget_allows_first_round() {
         assert!(!should_stop_for_duration_budget(45, 0, 0, 30));
+    }
+
+    #[test]
+    fn provider_rotation_uses_absolute_round_numbering() {
+        assert_eq!(rotation_index_for_round(1, 2), 0);
+        assert_eq!(rotation_index_for_round(2, 2), 1);
+        assert_eq!(rotation_index_for_round(3, 2), 0);
+        assert_eq!(rotation_index_for_round(4, 2), 1);
+    }
+
+    #[test]
+    fn provider_rotation_resume_preserves_long_run_order() {
+        assert_eq!(rotation_index_for_round(4, 3), 0);
+        assert_eq!(rotation_index_for_round(5, 3), 1);
+        assert_eq!(rotation_index_for_round(6, 3), 2);
     }
 
     #[test]

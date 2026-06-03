@@ -124,7 +124,7 @@ fn test_convergence_signals_across_rounds() {
     // Change velocity should be positive (deltas exist)
     let velocity = compute_change_velocity(&word_counts);
     println!("Change velocity: {velocity:.4}");
-    assert!(velocity >= 0.0 && velocity <= 1.0);
+    assert!((0.0..=1.0).contains(&velocity));
 
     // Similarity should show increasing overlap
     let mut prev_set: Option<HashSet<String>> = None;
@@ -233,7 +233,7 @@ fn test_convergence_round_2_has_score() {
     assert!(c.score.is_some(), "Round 2 should have a convergence score");
     let score = c.score.unwrap();
     assert!(
-        score >= 0.0 && score <= 1.0,
+        (0.0..=1.0).contains(&score),
         "Score should be in [0, 1]: {score}"
     );
     assert!(c.recommendation.is_some());

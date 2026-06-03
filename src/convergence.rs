@@ -577,13 +577,21 @@ mod tests {
                 scores.push(c.score);
 
                 // Verify each signal is in [0, 1]
-                assert!(ot >= 0.0 && ot <= 1.0, "Round {}: output_trend={ot}", i + 1);
                 assert!(
-                    cv >= 0.0 && cv <= 1.0,
+                    (0.0..=1.0).contains(&ot),
+                    "Round {}: output_trend={ot}",
+                    i + 1
+                );
+                assert!(
+                    (0.0..=1.0).contains(&cv),
                     "Round {}: change_velocity={cv}",
                     i + 1
                 );
-                assert!(st >= 0.0 && st <= 1.0, "Round {}: similarity={st}", i + 1);
+                assert!(
+                    (0.0..=1.0).contains(&st),
+                    "Round {}: similarity={st}",
+                    i + 1
+                );
             }
 
             prev_word_set = Some(current_set);
