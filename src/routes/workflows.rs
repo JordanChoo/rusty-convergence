@@ -13,6 +13,8 @@ use crate::storage::{
 use crate::types::{Meta, Workflow};
 use crate::validation::{check_role_name, validate_workflow_name};
 
+const SYNTHETIC_PLACEHOLDERS: &[&str] = &["previous_round"];
+
 pub async fn handle_create(kv: KvStore, mut req: Request) -> Result<Response> {
     let body: serde_json::Value = match req.json().await {
         Ok(v) => v,
@@ -131,6 +133,9 @@ pub async fn handle_create(kv: KvStore, mut req: Request) -> Result<Response> {
 
     let template_placeholders = extract_placeholders(effective_template);
     for placeholder in &template_placeholders {
+        if SYNTHETIC_PLACEHOLDERS.contains(&placeholder.as_str()) {
+            continue;
+        }
         if !documents.contains_key(placeholder.as_str()) {
             return json_error(
                 422,
@@ -147,6 +152,9 @@ pub async fn handle_create(kv: KvStore, mut req: Request) -> Result<Response> {
     if validate_impl_template {
         let impl_placeholders = extract_placeholders(effective_impl_template);
         for placeholder in &impl_placeholders {
+            if SYNTHETIC_PLACEHOLDERS.contains(&placeholder.as_str()) {
+                continue;
+            }
             if !documents.contains_key(placeholder.as_str()) {
                 return json_error(
                     422,
@@ -229,34 +237,6 @@ fn implementation_template_is_active(
     impl_every_n: Option<u32>,
 ) -> bool {
     template_with_impl.is_some() || impl_every_n.is_some_and(|n| n > 0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::implementation_template_is_active;
-
-    #[test]
-    fn implementation_template_inactive_for_normal_workflow() {
-        assert!(!implementation_template_is_active(None, None));
-    }
-
-    #[test]
-    fn implementation_template_inactive_for_zero_interval() {
-        assert!(!implementation_template_is_active(None, Some(0)));
-    }
-
-    #[test]
-    fn implementation_template_active_when_explicit_template_present() {
-        assert!(implementation_template_is_active(
-            Some("{{implementation}}"),
-            None
-        ));
-    }
-
-    #[test]
-    fn implementation_template_active_when_interval_enabled() {
-        assert!(implementation_template_is_active(None, Some(4)));
-    }
 }
 
 pub async fn handle_list(kv: KvStore, url: &Url) -> Result<Response> {
@@ -401,4 +381,32 @@ pub async fn handle_delete(kv: KvStore, name: &str) -> Result<Response> {
         vec![],
         None,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::implementation_template_is_active;
+
+    #[test]
+    fn implementation_template_inactive_for_normal_workflow() {
+        assert!(!implementation_template_is_active(None, None));
+    }
+
+    #[test]
+    fn implementation_template_inactive_for_zero_interval() {
+        assert!(!implementation_template_is_active(None, Some(0)));
+    }
+
+    #[test]
+    fn implementation_template_active_when_explicit_template_present() {
+        assert!(implementation_template_is_active(
+            Some("{{implementation}}"),
+            None
+        ));
+    }
+
+    #[test]
+    fn implementation_template_active_when_interval_enabled() {
+        assert!(implementation_template_is_active(None, Some(4)));
+    }
 }

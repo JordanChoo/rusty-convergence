@@ -315,8 +315,27 @@ pub async fn execute_round(
         wf.documents.clone()
     };
 
+    let effective_template = if template.contains("{{previous_round}}") {
+        if round > 1 {
+            let prev = kv_get::<Round>(kv, &round_key(workflow_name, round - 1))
+                .await
+                .map_err(|e| ExecutionError::Internal(e.to_string()))?;
+            let prev_content = prev
+                .and_then(|r| r.content)
+                .unwrap_or_else(|| "(Prior round has no content.)".to_string());
+            template.replace("{{previous_round}}", &prev_content)
+        } else {
+            template.replace(
+                "{{previous_round}}",
+                "(This is the first review round — no prior analysis available.)",
+            )
+        }
+    } else {
+        template.to_string()
+    };
+
     let (rendered_prompt, template_warnings) = match render_template(
-        template,
+        &effective_template,
         workflow_name,
         &documents,
         kv,
