@@ -1,9 +1,10 @@
 # Rusty Convergence
 
-Rusty Convergence is the API-first implementation of Automated Plan Reviser
-Pro (APRP). It is a Rust Cloudflare Worker that runs iterative specification
-review rounds against direct LLM APIs, stores results in Cloudflare KV, and
-computes convergence signals so callers can see when a plan is becoming stable.
+Rusty Convergence is the API-first implementation of
+[Automated Plan Reviser Pro (APRP)](https://github.com/Dicklesworthstone/automated_plan_reviser_pro).
+It is a Rust Cloudflare Worker that runs iterative specification review rounds
+against direct LLM APIs, stores results in Cloudflare KV, and computes
+convergence signals so callers can see when a plan is becoming stable.
 
 The system is designed for coding agents, CI jobs, scripts, and other
 automation. It does not drive a browser, depend on a ChatGPT web session, or
