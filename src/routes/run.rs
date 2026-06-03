@@ -643,7 +643,7 @@ pub async fn execute_round(
         ));
     }
 
-    let summary = on_round_complete(
+    let summary = match on_round_complete(
         kv,
         workflow_name,
         round,
@@ -656,7 +656,13 @@ pub async fn execute_round(
         &now,
     )
     .await
-    .map_err(|e| ExecutionError::Internal(e.to_string()))?;
+    {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = release_lock(kv, workflow_name).await;
+            return Err(ExecutionError::Internal(e.to_string()));
+        }
+    };
 
     Ok(RoundResult {
         content: content_buffer,
