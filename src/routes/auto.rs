@@ -8,7 +8,9 @@ use worker::*;
 use crate::error::{json_error, now_iso8601, success_response};
 use crate::routes::integrate::build_integration_prompt;
 use crate::routes::run::{execute_round, RoundResult};
-use crate::storage::{config_key, kv_get, meta_key, round_key};
+use crate::storage::{
+    config_key, kv_get, kv_list_by_prefix, meta_key, parse_round_number_from_key, round_key,
+};
 use crate::types::{Meta, Round, RoundStatus, RunOverrides, UsageStats, Workflow};
 use crate::validation::validate_workflow_name;
 
@@ -76,7 +78,9 @@ fn make_rotated_overrides(req: &AutoRunRequest, entry: &ProviderRotationEntry) -
         provider: Some(entry.provider.clone()),
         model: Some(entry.model.clone()),
         system_prompt: req.system_prompt.clone(),
-        provider_params: entry.provider_params.clone(),
+        // In rotation mode, omitted entry params mean "no provider params for this
+        // provider", not "fall back to the workflow-level provider params".
+        provider_params: Some(entry.provider_params.clone().unwrap_or_else(|| json!({}))),
     }
 }
 
@@ -180,73 +184,78 @@ async fn write_sse(writer: &web_sys::WritableStreamDefaultWriter, text: &str) {
 }
 
 async fn detect_start_round(kv: &KvStore, workflow: &str) -> Result<(u32, Vec<String>)> {
-    let mut warnings = Vec::new();
     let meta = kv_get::<Meta>(kv, &meta_key(workflow)).await?;
     let meta_latest = meta.as_ref().and_then(|m| m.latest_round).unwrap_or(0);
 
-    let hint = if meta_latest > 0 { meta_latest } else { 1 };
-
-    // Verify the round at meta_latest is actually Complete
-    let hint_complete = if meta_latest > 0 {
-        matches!(
-            kv_get::<Round>(kv, &round_key(workflow, meta_latest)).await?,
-            Some(r) if r.status == RoundStatus::Complete
-        )
-    } else {
-        false
-    };
-
-    let scan_from = if hint_complete {
-        meta_latest + 1
-    } else if meta_latest > 1 {
-        // Meta is wrong — scan backward to find last contiguous Complete
-        let mut last_ok = 0;
-        let mut check = meta_latest - 1;
-        while check >= 1 {
-            match kv_get::<Round>(kv, &round_key(workflow, check)).await? {
-                Some(r) if r.status == RoundStatus::Complete => {
-                    last_ok = check;
-                    break;
-                }
-                _ => {
-                    if check == 1 {
-                        break;
-                    }
-                    check -= 1;
-                }
+    let mut completed_rounds = Vec::new();
+    let prefix = format!("round::{workflow}::");
+    let mut cursor: Option<String> = None;
+    loop {
+        let (keys, next) = kv_list_by_prefix(kv, &prefix, 100, cursor.as_deref()).await?;
+        for key in keys {
+            let Some(round_num) = parse_round_number_from_key(&key) else {
+                continue;
+            };
+            if !(1..=MAX_ROUND_NUMBER).contains(&round_num) {
+                continue;
+            }
+            if matches!(
+                kv_get::<Round>(kv, &key).await?,
+                Some(r) if r.status == RoundStatus::Complete
+            ) {
+                completed_rounds.push(round_num);
             }
         }
-        if last_ok > 0 && last_ok < meta_latest {
-            warnings.push(format!(
-                "meta.latest_round is {} but round {} is not Complete; adjusted start to {}",
-                meta_latest,
-                meta_latest,
-                last_ok + 1
-            ));
-        }
-        last_ok + 1
-    } else {
-        hint
-    };
 
-    // Scan forward to skip any Complete rounds beyond the hint
-    let mut start = scan_from;
-    while start <= MAX_ROUND_NUMBER {
-        match kv_get::<Round>(kv, &round_key(workflow, start)).await? {
-            Some(r) if r.status == RoundStatus::Complete => {
-                if start > scan_from || (meta_latest > 0 && start > meta_latest) {
-                    warnings.push(format!(
-                        "Round {} found Complete beyond meta hint; advancing start",
-                        start
-                    ));
-                }
-                start += 1;
-            }
-            _ => break,
-        }
+        let Some(next_cursor) = next else {
+            break;
+        };
+        cursor = Some(next_cursor);
     }
 
-    Ok((start, warnings))
+    completed_rounds.sort_unstable();
+    completed_rounds.dedup();
+
+    Ok(determine_start_round_from_completed(
+        &completed_rounds,
+        meta_latest,
+    ))
+}
+
+fn determine_start_round_from_completed(
+    completed_rounds: &[u32],
+    meta_latest: u32,
+) -> (u32, Vec<String>) {
+    let mut warnings = Vec::new();
+    let mut start = 1;
+
+    for &round_num in completed_rounds {
+        if round_num < start {
+            continue;
+        }
+        if round_num == start {
+            start += 1;
+            continue;
+        }
+
+        warnings.push(format!(
+            "Non-contiguous round history: round {round_num} is Complete after round {start} is not Complete; starting at round {start}"
+        ));
+        break;
+    }
+
+    let meta_start = meta_latest.saturating_add(1);
+    if meta_latest > 0 && meta_start != start {
+        warnings.push(format!(
+            "meta.latest_round is {meta_latest}, but completed round records indicate start round {start}"
+        ));
+    } else if meta_latest == 0 && start > 1 {
+        warnings.push(format!(
+            "No meta.latest_round found, but completed round records indicate start round {start}"
+        ));
+    }
+
+    (start, warnings)
 }
 
 pub async fn handle(kv: KvStore, env: &Env, workflow: &str, mut req: Request) -> Result<Response> {
@@ -752,6 +761,7 @@ fn handle_sse(
                                 "duration_seconds": result.duration_seconds,
                                 "provider": result.provider,
                                 "model": result.model,
+                                "provider_params": result.provider_params,
                             }),
                         ),
                     )
@@ -872,6 +882,66 @@ mod tests {
         assert_eq!(rotation_index_for_round(4, 3), 0);
         assert_eq!(rotation_index_for_round(5, 3), 1);
         assert_eq!(rotation_index_for_round(6, 3), 2);
+    }
+
+    #[test]
+    fn rotated_overrides_do_not_inherit_workflow_provider_params() {
+        let req = AutoRunRequest {
+            rounds: Some(1),
+            min_rounds: None,
+            stop_on_convergence: None,
+            convergence_threshold: None,
+            max_duration_seconds: None,
+            include_integration: None,
+            include_impl: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            provider_params: Some(json!({"reasoning_effort": "high"})),
+            provider_rotation: None,
+        };
+        let entry = ProviderRotationEntry {
+            provider: "anthropic".to_string(),
+            model: "claude-opus-4-6".to_string(),
+            provider_params: None,
+        };
+
+        let overrides = make_rotated_overrides(&req, &entry);
+
+        assert_eq!(overrides.provider.as_deref(), Some("anthropic"));
+        assert_eq!(overrides.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(overrides.provider_params, Some(json!({})));
+    }
+
+    #[test]
+    fn start_detection_uses_first_gap_even_when_meta_points_later() {
+        let (start, warnings) = determine_start_round_from_completed(&[1, 2, 3, 5], 5);
+
+        assert_eq!(start, 4);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("Non-contiguous round history"))
+        );
+        assert!(warnings.iter().any(|w| w.contains("meta.latest_round")));
+    }
+
+    #[test]
+    fn start_detection_resumes_after_contiguous_completed_rounds_without_meta() {
+        let (start, warnings) = determine_start_round_from_completed(&[1, 2, 3], 0);
+
+        assert_eq!(start, 4);
+        assert!(warnings.iter().any(|w| w.contains("No meta.latest_round")));
+    }
+
+    #[test]
+    fn start_detection_returns_max_plus_one_when_all_rounds_complete() {
+        let completed_rounds: Vec<u32> = (1..=MAX_ROUND_NUMBER).collect();
+
+        let (start, warnings) = determine_start_round_from_completed(&completed_rounds, 999);
+
+        assert_eq!(start, MAX_ROUND_NUMBER + 1);
+        assert!(warnings.is_empty());
     }
 
     #[test]

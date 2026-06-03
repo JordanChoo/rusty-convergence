@@ -322,9 +322,13 @@ pub async fn execute_round(
 
     let effective_template = if template.contains("{{previous_round}}") {
         if round > 1 {
-            let prev = kv_get::<Round>(kv, &round_key(workflow_name, round - 1))
-                .await
-                .map_err(|e| ExecutionError::Internal(e.to_string()))?;
+            let prev = match kv_get::<Round>(kv, &round_key(workflow_name, round - 1)).await {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = release_lock(kv, workflow_name).await;
+                    return Err(ExecutionError::Internal(e.to_string()));
+                }
+            };
             let prev_content = prev
                 .and_then(|r| r.content)
                 .unwrap_or_else(|| "(Prior round has no content.)".to_string());
