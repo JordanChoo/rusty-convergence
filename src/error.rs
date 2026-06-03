@@ -1,7 +1,7 @@
 use serde_json::json;
 use worker::*;
 
-pub const VERSION: &str = "0.1.0";
+pub const VERSION: &str = "0.2.0";
 const MAX_ERROR_BODY_BYTES: usize = 4096;
 
 fn truncate(s: &str, max_bytes: usize) -> &str {
