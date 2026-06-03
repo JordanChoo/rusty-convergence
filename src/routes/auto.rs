@@ -7,7 +7,7 @@ use worker::*;
 
 use crate::error::{json_error, now_iso8601, success_response};
 use crate::routes::integrate::build_integration_prompt;
-use crate::routes::run::{execute_round, ExecutionError, RoundResult};
+use crate::routes::run::{execute_round, RoundResult};
 use crate::storage::{
     config_key, kv_get, kv_list_by_prefix, meta_key, parse_round_number_from_key,
 };
@@ -561,6 +561,7 @@ async fn handle_json(
     let mut final_round_data: Option<serde_json::Value> = None;
     let mut final_round_content: Option<String> = None;
     let mut stopped_reason = "completed".to_string();
+    let mut error_detail: Option<String> = None;
     let mut last_round_num = start_round;
 
     let mut round_num = start_round;
@@ -623,11 +624,13 @@ async fn handle_json(
                 if summaries.is_empty() {
                     return e.into_response();
                 }
+                let detail = format!("Round {round_num} failed: {e:?}");
                 stopped_reason = "error".to_string();
-                warnings.push(format!("Round {round_num} failed: {e:?}"));
                 warnings.push(format!(
-                    "Resume with POST /run/{workflow}/{round_num} or POST /auto/{workflow}"
+                    "{detail}. {} rounds completed before failure.",
+                    summaries.len()
                 ));
+                error_detail = Some(detail);
                 break;
             }
         }
@@ -639,6 +642,7 @@ async fn handle_json(
     let elapsed_seconds = (Date::now().as_millis() - batch_start_ms) / 1000;
 
     let mut data = json!({
+        "workflow": workflow,
         "rounds_completed": summaries.len(),
         "rounds_requested": rounds_requested,
         "start_round": start_round,
@@ -649,6 +653,9 @@ async fn handle_json(
         "total_usage": total_usage,
         "total_duration_seconds": total_duration,
     });
+    if let Some(ref detail) = error_detail {
+        data["error_detail"] = json!(detail);
+    }
     add_duration_budget_fields(&mut data, elapsed_seconds, max_duration);
 
     if include_integration {
@@ -658,7 +665,15 @@ async fn handle_json(
         }
     }
 
-    success_response(data, warnings, None)
+    let hint = if error_detail.is_some() {
+        Some(format!(
+            "Use POST /auto/{workflow} to resume from round {round_num}, or POST /run/{workflow}/{round_num} to retry the failed round individually."
+        ))
+    } else {
+        None
+    };
+
+    success_response(data, warnings, hint.as_deref())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -710,6 +725,7 @@ fn handle_sse(
         let mut final_round_data: Option<serde_json::Value> = None;
         let mut final_round_content: Option<String> = None;
         let mut stopped_reason = "completed".to_string();
+        let mut error_detail: Option<String> = None;
         let mut last_round_num = start_round;
 
         let mut round_num = start_round;
@@ -794,6 +810,7 @@ fn handle_sse(
                     continue;
                 }
                 Err(e) => {
+                    let detail = format!("Round {round_num} failed: {e:?}");
                     write_sse(
                         &writer,
                         &format_sse(
@@ -801,11 +818,13 @@ fn handle_sse(
                             &json!({
                                 "round": round_num,
                                 "error": format!("{e:?}"),
+                                "rounds_completed": summaries.len(),
                             }),
                         ),
                     )
                     .await;
                     stopped_reason = "error".to_string();
+                    error_detail = Some(detail);
                     break;
                 }
             }
@@ -814,6 +833,7 @@ fn handle_sse(
 
         let total_elapsed_s = (Date::now().as_millis() - batch_start_ms) / 1000;
         let mut done_data = json!({
+            "workflow": workflow,
             "rounds_completed": summaries.len(),
             "rounds_requested": rounds_requested,
             "start_round": start_round,
@@ -824,6 +844,9 @@ fn handle_sse(
             "total_usage": total_usage,
             "total_duration_seconds": total_elapsed_s,
         });
+        if let Some(ref detail) = error_detail {
+            done_data["error_detail"] = json!(detail);
+        }
         add_duration_budget_fields(&mut done_data, total_elapsed_s, max_duration);
         if include_integration {
             if let Some(content) = &final_round_content {

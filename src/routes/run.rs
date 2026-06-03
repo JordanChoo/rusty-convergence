@@ -338,10 +338,20 @@ pub async fn execute_round(
                 .unwrap_or_else(|| "(Prior round has no content.)".to_string());
             template.replace("{{previous_round}}", &prev_content)
         } else {
-            template.replace(
-                "{{previous_round}}",
-                "(This is the first review round — no prior analysis available.)",
+            let spec_role = documents
+                .get("spec")
+                .cloned()
+                .unwrap_or_else(|| "spec".to_string());
+            let spec_content = match crate::storage::kv_get_text(
+                kv,
+                &crate::storage::doc_key(workflow_name, &spec_role),
             )
+            .await
+            {
+                Ok(Some(text)) => text,
+                _ => "(No spec document found for first round.)".to_string(),
+            };
+            template.replace("{{previous_round}}", &spec_content)
         }
     } else {
         template.to_string()

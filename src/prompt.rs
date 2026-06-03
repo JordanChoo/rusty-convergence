@@ -5,7 +5,7 @@ use worker::kv::KvStore;
 use crate::storage::{doc_key, kv_get_text};
 use crate::types::Workflow;
 
-pub const DEFAULT_TEMPLATE: &str = r#"First, read this README:
+pub const DEFAULT_TEMPLATE: &str = r#"First, read this README for project context:
 
 ```
 {{readme}}
@@ -13,29 +13,34 @@ pub const DEFAULT_TEMPLATE: &str = r#"First, read this README:
 
 ---
 
-Here is the analysis from the previous review round. Carefully review it,
-fix any errors, fill gaps, resolve contradictions, and refine the suggestions.
-If this is the first round, treat this section as empty and perform your own
-independent analysis:
+Here is the ORIGINAL specification for reference:
+
+```
+{{spec}}
+```
+
+---
+
+Below is the current working version of the document to improve. On the first
+round this will be identical to the original above. On subsequent rounds it
+contains the improvements from the previous iteration:
 
 {{previous_round}}
 
 ---
 
-NOW: Carefully review this entire plan for me and come up with your best
-revisions in terms of better architecture, new features, changed features,
-etc. to make it better, more robust/reliable, more performant, more
-compelling/useful, etc.
+YOUR TASK: Produce a COMPLETE, improved version of the document above. Make it
+better in terms of architecture, security, reliability, performance,
+completeness, and clarity. Fix any errors, fill gaps, resolve contradictions,
+and strengthen weak sections.
 
-For each proposed change, give me your detailed analysis and
-rationale/justification for why it would make the project better along
-with the git-diff style change versus the original plan shown below:
+IMPORTANT: Output the ENTIRE revised document — not a summary, not a list of
+suggestions, not diffs. The full document with all improvements applied.
+Preserve the overall structure and formatting. Every section of the original
+should appear in your output, improved where needed and unchanged where
+already strong."#;
 
-```
-{{spec}}
-```"#;
-
-pub const DEFAULT_TEMPLATE_WITH_IMPL: &str = r#"First, read this README:
+pub const DEFAULT_TEMPLATE_WITH_IMPL: &str = r#"First, read this README for project context:
 
 ```
 {{readme}}
@@ -43,10 +48,8 @@ pub const DEFAULT_TEMPLATE_WITH_IMPL: &str = r#"First, read this README:
 
 ---
 
-And here is a document detailing the implementation that follows the
-specification document given below; you should also keep the implementation
-in mind as you think about the specification, since ultimately the
-specification needs to be translated into code:
+Here is the current implementation to keep in mind — the specification must
+ultimately be translatable into code:
 
 ```
 {{implementation}}
@@ -54,27 +57,33 @@ specification needs to be translated into code:
 
 ---
 
-Here is the analysis from the previous review round. Carefully review it,
-fix any errors, fill gaps, resolve contradictions, and refine the suggestions.
-If this is the first round, treat this section as empty and perform your own
-independent analysis:
+Here is the ORIGINAL specification for reference:
+
+```
+{{spec}}
+```
+
+---
+
+Below is the current working version of the document to improve. On the first
+round this will be identical to the original above. On subsequent rounds it
+contains the improvements from the previous iteration:
 
 {{previous_round}}
 
 ---
 
-NOW: Carefully review this entire plan for me and come up with your best
-revisions in terms of better architecture, new features, changed features,
-etc. to make it better, more robust/reliable, more performant, more
-compelling/useful, etc.
+YOUR TASK: Produce a COMPLETE, improved version of the document above. Make it
+better in terms of architecture, security, reliability, performance,
+completeness, and clarity. Fix any errors, fill gaps, resolve contradictions,
+and strengthen weak sections. Keep the implementation in mind — ensure the
+specification remains implementable.
 
-For each proposed change, give me your detailed analysis and
-rationale/justification for why it would make the project better along
-with the git-diff style change versus the original plan shown below:
-
-```
-{{spec}}
-```"#;
+IMPORTANT: Output the ENTIRE revised document — not a summary, not a list of
+suggestions, not diffs. The full document with all improvements applied.
+Preserve the overall structure and formatting. Every section of the original
+should appear in your output, improved where needed and unchanged where
+already strong."#;
 
 pub fn extract_placeholders(template: &str) -> Vec<String> {
     let mut result = Vec::new();
@@ -273,7 +282,7 @@ mod tests {
     #[test]
     fn test_extract_from_default_template() {
         let placeholders = extract_placeholders(DEFAULT_TEMPLATE);
-        assert_eq!(placeholders, vec!["readme", "previous_round", "spec"]);
+        assert_eq!(placeholders, vec!["readme", "spec", "previous_round"]);
     }
 
     #[test]
@@ -281,7 +290,7 @@ mod tests {
         let placeholders = extract_placeholders(DEFAULT_TEMPLATE_WITH_IMPL);
         assert_eq!(
             placeholders,
-            vec!["readme", "implementation", "previous_round", "spec"]
+            vec!["readme", "implementation", "spec", "previous_round"]
         );
     }
 
