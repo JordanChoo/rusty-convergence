@@ -13,6 +13,15 @@ pub const DEFAULT_TEMPLATE: &str = r#"First, read this README:
 
 ---
 
+Here is the analysis from the previous review round. Carefully review it,
+fix any errors, fill gaps, resolve contradictions, and refine the suggestions.
+If this is the first round, treat this section as empty and perform your own
+independent analysis:
+
+{{previous_round}}
+
+---
+
 NOW: Carefully review this entire plan for me and come up with your best
 revisions in terms of better architecture, new features, changed features,
 etc. to make it better, more robust/reliable, more performant, more
@@ -42,6 +51,15 @@ specification needs to be translated into code:
 ```
 {{implementation}}
 ```
+
+---
+
+Here is the analysis from the previous review round. Carefully review it,
+fix any errors, fill gaps, resolve contradictions, and refine the suggestions.
+If this is the first round, treat this section as empty and perform your own
+independent analysis:
+
+{{previous_round}}
 
 ---
 
@@ -255,13 +273,16 @@ mod tests {
     #[test]
     fn test_extract_from_default_template() {
         let placeholders = extract_placeholders(DEFAULT_TEMPLATE);
-        assert_eq!(placeholders, vec!["readme", "spec"]);
+        assert_eq!(placeholders, vec!["readme", "previous_round", "spec"]);
     }
 
     #[test]
     fn test_extract_from_default_impl_template() {
         let placeholders = extract_placeholders(DEFAULT_TEMPLATE_WITH_IMPL);
-        assert_eq!(placeholders, vec!["readme", "implementation", "spec"]);
+        assert_eq!(
+            placeholders,
+            vec!["readme", "implementation", "previous_round", "spec"]
+        );
     }
 
     #[test]
