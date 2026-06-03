@@ -736,8 +736,11 @@ Verify the deployed Worker:
 
 ```bash
 ./scripts/verify-deploy.sh "https://rusty-convergence.<your-subdomain>.workers.dev" "$CSVKEY"
-curl "https://rusty-convergence.<your-subdomain>.workers.dev/health?csvkey=$CSVKEY"
 ```
+
+The verifier includes an authenticated health preflight that checks whether
+`OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are configured before any provider
+calls are attempted.
 
 ## Local Development
 
