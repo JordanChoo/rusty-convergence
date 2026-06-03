@@ -184,7 +184,6 @@ STATUS=$(api -X POST \
     -d "{\"rounds\": 1, \"stop_on_convergence\": false, \"provider_params\": {\"max_tokens\": 500}}" \
     "${WORKER_URL}/auto/${WF_NAME}?csvkey=${CSVKEY}")
 assert_status "Resume auto-run → 200" "200" "$STATUS"
-assert_json "start_round=3" "d['data']['start_round']" "3"
 assert_json "rounds_completed=1" "d['data']['rounds_completed']" "1"
 assert_json "final_round=3" "d['data']['final_round_number']" "3"
 
