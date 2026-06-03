@@ -7,8 +7,8 @@ use worker::*;
 
 use crate::error::{json_error, now_iso8601, success_response};
 use crate::routes::run::{execute_round, RoundResult};
-use crate::storage::{config_key, kv_get, meta_key};
-use crate::types::{Meta, RunOverrides, UsageStats, Workflow};
+use crate::storage::{config_key, kv_get, meta_key, round_key};
+use crate::types::{Meta, Round, RoundStatus, RunOverrides, UsageStats, Workflow};
 use crate::validation::validate_workflow_name;
 
 const DEFAULT_MAX_AUTO_ROUNDS: u32 = 20;
@@ -115,11 +115,74 @@ async fn write_sse(writer: &web_sys::WritableStreamDefaultWriter, text: &str) {
     let _ = wasm_bindgen_futures::JsFuture::from(writer.write_with_chunk(&chunk)).await;
 }
 
-async fn detect_start_round(kv: &KvStore, workflow: &str) -> Result<u32> {
-    match kv_get::<Meta>(kv, &meta_key(workflow)).await? {
-        Some(meta) => Ok(meta.latest_round.map_or(1, |r| r + 1)),
-        None => Ok(1),
+async fn detect_start_round(kv: &KvStore, workflow: &str) -> Result<(u32, Vec<String>)> {
+    let mut warnings = Vec::new();
+    let meta = kv_get::<Meta>(kv, &meta_key(workflow)).await?;
+    let meta_latest = meta.as_ref().and_then(|m| m.latest_round).unwrap_or(0);
+
+    let hint = if meta_latest > 0 { meta_latest } else { 1 };
+
+    // Verify the round at meta_latest is actually Complete
+    let hint_complete = if meta_latest > 0 {
+        matches!(
+            kv_get::<Round>(kv, &round_key(workflow, meta_latest)).await?,
+            Some(r) if r.status == RoundStatus::Complete
+        )
+    } else {
+        false
+    };
+
+    let scan_from = if hint_complete {
+        meta_latest + 1
+    } else if meta_latest > 1 {
+        // Meta is wrong — scan backward to find last contiguous Complete
+        let mut last_ok = 0;
+        let mut check = meta_latest - 1;
+        while check >= 1 {
+            match kv_get::<Round>(kv, &round_key(workflow, check)).await? {
+                Some(r) if r.status == RoundStatus::Complete => {
+                    last_ok = check;
+                    break;
+                }
+                _ => {
+                    if check == 1 {
+                        break;
+                    }
+                    check -= 1;
+                }
+            }
+        }
+        if last_ok > 0 && last_ok < meta_latest {
+            warnings.push(format!(
+                "meta.latest_round is {} but round {} is not Complete; adjusted start to {}",
+                meta_latest,
+                meta_latest,
+                last_ok + 1
+            ));
+        }
+        last_ok + 1
+    } else {
+        hint
+    };
+
+    // Scan forward to skip any Complete rounds beyond the hint
+    let mut start = scan_from;
+    while start <= MAX_ROUND_NUMBER {
+        match kv_get::<Round>(kv, &round_key(workflow, start)).await? {
+            Some(r) if r.status == RoundStatus::Complete => {
+                if start > scan_from || (meta_latest > 0 && start > meta_latest) {
+                    warnings.push(format!(
+                        "Round {} found Complete beyond meta hint; advancing start",
+                        start
+                    ));
+                }
+                start += 1;
+            }
+            _ => break,
+        }
     }
+
+    Ok((start, warnings))
 }
 
 pub async fn handle(kv: KvStore, env: &Env, workflow: &str, mut req: Request) -> Result<Response> {
@@ -220,7 +283,7 @@ pub async fn handle(kv: KvStore, env: &Env, workflow: &str, mut req: Request) ->
         );
     }
 
-    let start_round = match detect_start_round(&kv, workflow).await {
+    let (start_round, detection_warnings) = match detect_start_round(&kv, workflow).await {
         Ok(r) => r,
         Err(e) => return Err(e),
     };
@@ -234,7 +297,7 @@ pub async fn handle(kv: KvStore, env: &Env, workflow: &str, mut req: Request) ->
         );
     }
 
-    let mut warnings: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = detection_warnings;
 
     let effective_rounds = if start_round + rounds - 1 > MAX_ROUND_NUMBER {
         let capped = MAX_ROUND_NUMBER - start_round + 1;
@@ -333,7 +396,7 @@ async fn handle_json(
 
                 let converged = stop_on_convergence
                     && summaries.len() + 1 >= min_rounds as usize
-                    && result.convergence.score.map_or(false, |s| s >= threshold);
+                    && result.convergence.score.is_some_and(|s| s >= threshold);
 
                 for w in &result.template_warnings {
                     if !warnings.contains(w) {
@@ -404,7 +467,6 @@ fn handle_sse(
     let writer = writable
         .get_writer()
         .map_err(|e| Error::JsError(format!("get_writer failed: {e:?}")))?;
-    let writer: web_sys::WritableStreamDefaultWriter = writer.into();
 
     spawn_local(async move {
         write_sse(&writer, &format_sse_comment("connected")).await;
@@ -469,7 +531,7 @@ fn handle_sse(
 
                     let converged = stop_on_convergence
                         && summaries.len() + 1 >= min_rounds as usize
-                        && result.convergence.score.map_or(false, |s| s >= threshold);
+                        && result.convergence.score.is_some_and(|s| s >= threshold);
 
                     summaries.push(summary);
 
