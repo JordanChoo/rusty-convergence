@@ -563,9 +563,8 @@ async fn handle_json(
     let mut stopped_reason = "completed".to_string();
     let mut last_round_num = start_round;
 
-    for i in 0..effective_rounds {
-        let round_num = start_round + i;
-
+    let mut round_num = start_round;
+    while summaries.len() < effective_rounds as usize && round_num <= MAX_ROUND_NUMBER {
         if let Some(budget) = max_duration {
             if !summaries.is_empty() {
                 let elapsed_ms = Date::now().as_millis() - batch_start_ms;
@@ -617,6 +616,7 @@ async fn handle_json(
             }
             Err(e) if e.is_round_already_complete() => {
                 last_round_num = round_num;
+                round_num += 1;
                 continue;
             }
             Err(e) => {
@@ -631,6 +631,7 @@ async fn handle_json(
                 break;
             }
         }
+        round_num += 1;
     }
 
     let batch_end = now_iso8601();
@@ -711,9 +712,8 @@ fn handle_sse(
         let mut stopped_reason = "completed".to_string();
         let mut last_round_num = start_round;
 
-        for i in 0..effective_rounds {
-            let round_num = start_round + i;
-
+        let mut round_num = start_round;
+        while summaries.len() < effective_rounds as usize && round_num <= MAX_ROUND_NUMBER {
             if let Some(budget) = max_duration {
                 if !summaries.is_empty() {
                     let elapsed_ms = Date::now().as_millis() - batch_start_ms;
@@ -790,6 +790,7 @@ fn handle_sse(
                 }
                 Err(e) if e.is_round_already_complete() => {
                     last_round_num = round_num;
+                    round_num += 1;
                     continue;
                 }
                 Err(e) => {
@@ -808,6 +809,7 @@ fn handle_sse(
                     break;
                 }
             }
+            round_num += 1;
         }
 
         let total_elapsed_s = (Date::now().as_millis() - batch_start_ms) / 1000;
