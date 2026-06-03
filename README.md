@@ -127,6 +127,7 @@ src/
     |-- workflows.rs
     |-- documents.rs
     |-- run.rs
+    |-- auto.rs
     |-- rounds.rs
     |-- stats.rs
     `-- integrate.rs
@@ -247,6 +248,7 @@ Common error codes:
 | `GET` | `/stats/:workflow` | yes | Read cached convergence analytics |
 | `POST` | `/stats/:workflow/rebuild` | yes | Recompute stats from completed rounds |
 | `POST` | `/integrate/:workflow/:round` | yes | Generate a coding-agent integration prompt |
+| `POST` | `/auto/:workflow` | yes | Execute multiple review rounds with convergence stop |
 
 ## Quick Start With Curl
 
@@ -419,6 +421,108 @@ Provider params are passed through with protected fields blocked:
 The route layer owns those fields, which prevents callers from replacing the
 selected model or rendered document bundle by accident.
 
+## Auto-Run: Multi-Round Batch Execution
+
+`POST /auto/:workflow` runs multiple review rounds sequentially with automatic
+convergence detection, duration budgets, and optional cross-model rotation.
+
+### Request Body
+
+```json
+{
+  "rounds": 5,
+  "min_rounds": 3,
+  "stop_on_convergence": true,
+  "convergence_threshold": 0.90,
+  "max_duration_seconds": 300,
+  "include_integration": true,
+  "provider_rotation": [
+    { "provider": "openai", "model": "o3", "provider_params": { "reasoning_effort": "high" } },
+    { "provider": "anthropic", "model": "claude-opus-4-6" }
+  ]
+}
+```
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `rounds` | integer | yes | — | Rounds to execute (1–MAX_AUTO_ROUNDS) |
+| `min_rounds` | integer | no | `1` | Minimum rounds before convergence check |
+| `stop_on_convergence` | bool | no | `true` | Stop when score >= threshold |
+| `convergence_threshold` | float | no | `0.90` | Score threshold for early stop |
+| `max_duration_seconds` | integer | no | — | Wall-clock budget in seconds (>= 30) |
+| `include_integration` | bool | no | `false` | Include integration prompt in response |
+| `provider_rotation` | array | no | — | Cycle providers per round |
+| `include_impl` | bool | no | — | Same as POST /run override |
+| `system_prompt` | string | no | — | Same as POST /run override |
+
+`provider_rotation` is mutually exclusive with top-level `provider`, `model`,
+and `provider_params`. Use one or the other.
+
+### Response Format
+
+The default response uses Server-Sent Events (SSE). Each round emits
+`round_start` and `round_complete` events. A final `done` event contains the
+aggregate result. Request with `Accept: application/json` for a buffered JSON
+response instead.
+
+SSE events:
+
+```
+event: round_start
+data: {"round":1,"started_at":"2026-06-03T10:05:00Z"}
+
+event: round_complete
+data: {"round":1,"words":4000,"score":null,"recommendation":null,"duration_seconds":45,"provider":"openai","model":"o3"}
+
+event: done
+data: {"rounds_completed":3,"stopped_reason":"convergence","final_round":{...},"rounds_summary":[...],"total_usage":{...},"total_duration_seconds":118}
+```
+
+`stopped_reason` values: `completed`, `convergence`, `duration_limit`, `error`.
+
+### Starting Round Detection
+
+The endpoint automatically detects where to resume. It reads the workflow
+metadata and verifies against actual round records. If metadata is stale or
+missing, it scans forward to find the correct starting point.
+
+### Examples
+
+Basic auto-run:
+
+```bash
+curl -N -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"rounds": 5}' \
+  "$WORKER_URL/auto/demo?csvkey=$CSVKEY"
+```
+
+JSON response with convergence stop and integration prompt:
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -d '{"rounds": 10, "min_rounds": 3, "convergence_threshold": 0.85, "include_integration": true}' \
+  "$WORKER_URL/auto/demo?csvkey=$CSVKEY"
+```
+
+Cross-model rotation with duration budget:
+
+```bash
+curl -N -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+    "rounds": 10,
+    "max_duration_seconds": 300,
+    "provider_rotation": [
+      {"provider": "openai", "model": "o3"},
+      {"provider": "anthropic", "model": "claude-opus-4-6"}
+    ]
+  }' \
+  "$WORKER_URL/auto/demo?csvkey=$CSVKEY"
+```
+
 ## Prompt Templates
 
 Templates use `{{placeholder}}` syntax. Placeholders refer to workflow document
@@ -456,6 +560,24 @@ Implementation context is selected when:
 Warnings are returned when a configured role is not referenced by the selected
 template. Missing referenced roles or missing uploaded documents are hard
 validation errors.
+
+### Iterative Refinement with {{previous_round}}
+
+By default, each round sends the same prompt with the same documents. Rounds
+are independent samples. To enable iterative refinement where each round builds
+on the prior round's analysis, include `{{previous_round}}` in a custom
+template:
+
+```json
+{
+  "template": "Read the README:\n\n{{readme}}\n\nHere is the prior round's analysis:\n\n{{previous_round}}\n\nReview and improve the analysis of:\n\n{{spec}}"
+}
+```
+
+`{{previous_round}}` is a synthetic placeholder — it does not require a
+documents map entry. On round 1 it substitutes explanatory text. On round N it
+injects round N-1's completed content. This works with both `POST /run` and
+`POST /auto`.
 
 ## Round Lifecycle
 

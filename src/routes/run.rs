@@ -135,6 +135,7 @@ pub async fn on_round_complete(
     usage: Option<crate::types::UsageStats>,
     provider: &str,
     model: &str,
+    provider_params: Option<serde_json::Value>,
     include_impl: bool,
     started_at: &str,
 ) -> Result<RoundCompletionSummary> {
@@ -158,6 +159,7 @@ pub async fn on_round_complete(
         usage,
         provider: provider.to_string(),
         model: model.to_string(),
+        provider_params,
         include_impl,
         started_at: started_at.to_string(),
         completed_at: Some(completed_at.clone()),
@@ -202,6 +204,7 @@ pub async fn on_round_failed(
     partial_content: Option<&str>,
     provider: &str,
     model: &str,
+    provider_params: Option<serde_json::Value>,
     include_impl: bool,
     started_at: &str,
 ) -> Result<()> {
@@ -217,6 +220,7 @@ pub async fn on_round_failed(
         usage: None,
         provider: provider.to_string(),
         model: model.to_string(),
+        provider_params,
         include_impl,
         started_at: started_at.to_string(),
         completed_at: None,
@@ -367,6 +371,11 @@ pub async fn execute_round(
         }
     };
 
+    let provider_params = overrides
+        .provider_params
+        .clone()
+        .or_else(|| wf.provider_params.clone());
+
     let now = now_iso8601();
     let running_round = Round {
         workflow: workflow_name.to_string(),
@@ -379,6 +388,7 @@ pub async fn execute_round(
         usage: None,
         provider: provider.clone(),
         model: model.clone(),
+        provider_params: provider_params.clone(),
         include_impl,
         started_at: now.clone(),
         completed_at: None,
@@ -391,11 +401,6 @@ pub async fn execute_round(
         return Err(ExecutionError::Internal(e.to_string()));
     }
 
-    let provider_params = overrides
-        .provider_params
-        .as_ref()
-        .or(wf.provider_params.as_ref());
-
     let build_fetch_result: Result<(Response,)> = async {
         let (api_url, request_body, auth_headers) = match provider.as_str() {
             "openai" => {
@@ -403,7 +408,7 @@ pub async fn execute_round(
                     &model,
                     system_prompt.as_deref(),
                     &rendered_prompt,
-                    provider_params,
+                    provider_params.as_ref(),
                 );
                 let headers = Headers::new();
                 headers.set("Authorization", &format!("Bearer {api_key}"))?;
@@ -415,7 +420,7 @@ pub async fn execute_round(
                     &model,
                     system_prompt.as_deref(),
                     &rendered_prompt,
-                    provider_params,
+                    provider_params.as_ref(),
                 );
                 let headers = Headers::new();
                 headers.set("x-api-key", &api_key)?;
@@ -454,6 +459,7 @@ pub async fn execute_round(
                 None,
                 &provider,
                 &model,
+                provider_params.clone(),
                 include_impl,
                 &now,
             )
@@ -479,6 +485,7 @@ pub async fn execute_round(
             None,
             &provider,
             &model,
+            provider_params.clone(),
             include_impl,
             &now,
         )
@@ -498,6 +505,7 @@ pub async fn execute_round(
                 None,
                 &provider,
                 &model,
+                provider_params.clone(),
                 include_impl,
                 &now,
             )
@@ -536,6 +544,7 @@ pub async fn execute_round(
                             partial,
                             &provider,
                             &model,
+                            provider_params.clone(),
                             include_impl,
                             &now,
                         )
@@ -571,6 +580,7 @@ pub async fn execute_round(
                             partial,
                             &provider,
                             &model,
+                            provider_params.clone(),
                             include_impl,
                             &now,
                         )
@@ -595,6 +605,7 @@ pub async fn execute_round(
             None,
             &provider,
             &model,
+            provider_params.clone(),
             include_impl,
             &now,
         )
@@ -616,6 +627,7 @@ pub async fn execute_round(
             Some(&content_buffer),
             &provider,
             &model,
+            provider_params.clone(),
             include_impl,
             &now,
         )
@@ -634,6 +646,7 @@ pub async fn execute_round(
         usage.clone(),
         &provider,
         &model,
+        provider_params.clone(),
         include_impl,
         &now,
     )

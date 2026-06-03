@@ -28,6 +28,8 @@ pub struct Round {
     pub usage: Option<UsageStats>,
     pub provider: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_params: Option<serde_json::Value>,
     pub include_impl: bool,
     pub started_at: String,
     pub completed_at: Option<String>,
