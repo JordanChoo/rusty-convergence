@@ -136,6 +136,14 @@ fn accumulate_usage(total: &mut UsageStats, round_usage: &Option<UsageStats>) {
     }
 }
 
+fn append_unique_warnings(warnings: &mut Vec<String>, new_warnings: &[String]) {
+    for warning in new_warnings {
+        if !warnings.contains(warning) {
+            warnings.push(warning.clone());
+        }
+    }
+}
+
 fn format_sse(event: &str, data: &serde_json::Value) -> String {
     format!("event: {event}\ndata: {}\n\n", data)
 }
@@ -602,11 +610,7 @@ async fn handle_json(
                     && summaries.len() + 1 >= min_rounds as usize
                     && result.convergence.score.is_some_and(|s| s >= threshold);
 
-                for w in &result.template_warnings {
-                    if !warnings.contains(w) {
-                        warnings.push(w.clone());
-                    }
-                }
+                append_unique_warnings(&mut warnings, &result.template_warnings);
 
                 summaries.push(summary);
 
@@ -706,10 +710,11 @@ fn handle_sse(
     spawn_local(async move {
         write_sse(&writer, &format_sse_comment("connected")).await;
 
+        let mut warnings = warnings;
         if !warnings.is_empty() {
             write_sse(
                 &writer,
-                &format_sse("warnings", &json!({ "warnings": warnings })),
+                &format_sse("warnings", &json!({ "warnings": warnings.clone() })),
             )
             .await;
         }
@@ -790,6 +795,7 @@ fn handle_sse(
                     final_round_data = Some(round_to_final(round_num, &result));
                     final_round_content = Some(result.content.clone());
                     accumulate_usage(&mut total_usage, &result.usage);
+                    append_unique_warnings(&mut warnings, &result.template_warnings);
                     completed_round_duration_seconds += result.duration_seconds;
                     last_round_num = round_num;
 
@@ -843,6 +849,7 @@ fn handle_sse(
             "rounds_summary": summaries,
             "total_usage": total_usage,
             "total_duration_seconds": total_elapsed_s,
+            "warnings": warnings,
         });
         if let Some(ref detail) = error_detail {
             done_data["error_detail"] = json!(detail);
@@ -944,6 +951,23 @@ mod tests {
         assert_eq!(overrides.provider.as_deref(), Some("anthropic"));
         assert_eq!(overrides.model.as_deref(), Some("claude-opus-4-6"));
         assert_eq!(overrides.provider_params, Some(json!({})));
+    }
+
+    #[test]
+    fn append_unique_warnings_deduplicates_existing_entries() {
+        let mut warnings = vec!["initial warning".to_string(), "shared warning".to_string()];
+        let new_warnings = vec!["shared warning".to_string(), "template warning".to_string()];
+
+        append_unique_warnings(&mut warnings, &new_warnings);
+
+        assert_eq!(
+            warnings,
+            vec![
+                "initial warning".to_string(),
+                "shared warning".to_string(),
+                "template warning".to_string()
+            ]
+        );
     }
 
     #[test]
